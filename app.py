@@ -13,8 +13,8 @@ from pathlib import Path
 from flask import Flask, abort, jsonify, redirect, render_template, request, send_file  # pyright: ignore[reportMissingImports] — env lacks flask; runtime python3 has it
 
 import config
-from itemizer import parse_document  # pyright: ignore[reportMissingImports] — same-dir module
-from ocr_engine import assemble_markdown, ocr_batch, ocr_page, pdf_to_images
+from itemizer import parse_document, parse_table_caption, unwrap_html_caption  # pyright: ignore[reportMissingImports] — same-dir module
+from ocr_engine import assemble_markdown, ocr_batch, ocr_page, pdf_to_images, tesseract_ocr
 
 BASE = Path(__file__).resolve().parent
 VALIDATION = BASE / "validation"
@@ -112,6 +112,9 @@ def apply_action(doc, item_id, action, content=None):
                     "type": item["type"],
                     "content": final,
                 }
+                if item.get("caption") is not None:
+                    payload["caption"] = item["caption"]
+                    payload["table_number"] = item.get("table_number")
                 target = VERIFIED_DIR if action == "accept" else REJECTED_DIR
                 (target / f"{item_id}.json").write_text(json.dumps(payload, indent=2))
                 item["status"] = "verified" if action == "accept" else "rejected"
@@ -262,6 +265,48 @@ def discard_doc(doc_id):
     return jsonify({"ok": True})
 
 
+def _render_crop(doc, page, box):
+    """Render a page region (fractions 0..1) to a temp PNG; returns the Path.
+
+    Raises ValueError for out-of-range pages or non-positive w/h. The caller
+    owns the temp file and must delete it.
+    """
+    try:
+        fx, fy, fw, fh = (float(box[k]) for k in ("x", "y", "w", "h"))
+    except (KeyError, TypeError, ValueError) as e:
+        raise ValueError("x, y, w, h required (fractions of the page, 0..1)") from e
+    if fw <= 0 or fh <= 0:
+        raise ValueError("box width/height must be positive")
+
+    import pymupdf
+
+    with pymupdf.open(doc["pdf_path"]) as pdf:
+        if page < 1 or page > len(pdf):
+            raise ValueError("page out of range")
+        pr = pdf[page - 1].rect
+        clip = pymupdf.Rect(
+            pr.x0 + fx * pr.width, pr.y0 + fy * pr.height,
+            pr.x0 + (fx + fw) * pr.width, pr.y0 + (fy + fh) * pr.height,
+        )
+        pix = pdf[page - 1].get_pixmap(
+            matrix=pymupdf.Matrix(200 / 72, 200 / 72), clip=clip
+        )
+
+    tmp = UPLOADS / doc["doc_id"] / f"crop_{page}_{uuid.uuid4().hex[:8]}.png"
+    tmp.parent.mkdir(parents=True, exist_ok=True)
+    pix.save(str(tmp))
+    return tmp
+
+
+def _ocr_page_crop(doc, page, box):
+    """Render a page region and OCR it with GLM-OCR; returns the text."""
+    tmp = _render_crop(doc, page, box)
+    try:
+        return ocr_page(str(tmp), page_num=page)["text"]
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
 @app.route("/bbox_ocr/<doc_id>", methods=["POST"])
 def bbox_ocr(doc_id):
     if not re.fullmatch(r"[A-Za-z0-9._-]+", doc_id):
@@ -272,37 +317,75 @@ def bbox_ocr(doc_id):
     data = request.get_json(silent=True) or {}
     try:
         page = int(data.get("page", 1))
-        fx, fy, fw, fh = (float(data[k]) for k in ("x", "y", "w", "h"))
+        box = {k: float(data[k]) for k in ("x", "y", "w", "h")}
     except (KeyError, TypeError, ValueError):
         abort(400, "page, x, y, w, h required (fractions of the page, 0..1)")
-    if fw <= 0 or fh <= 0:
-        abort(400, "box width/height must be positive")
 
-    import pymupdf
-
-    with pymupdf.open(doc["pdf_path"]) as pdf:
-        if page < 1 or page > len(pdf):
-            abort(404, "page out of range")
-        pr = pdf[page - 1].rect
-        clip = pymupdf.Rect(
-            pr.x0 + fx * pr.width, pr.y0 + fy * pr.height,
-            pr.x0 + (fx + fw) * pr.width, pr.y0 + (fy + fh) * pr.height,
-        )
-        pix = pdf[page - 1].get_pixmap(
-            matrix=pymupdf.Matrix(200 / 72, 200 / 72), clip=clip
-        )
-
-    tmp = UPLOADS / doc_id / f"bbox_{page}_{uuid.uuid4().hex[:8]}.png"
-    tmp.parent.mkdir(parents=True, exist_ok=True)
-    pix.save(str(tmp))
     try:
-        result = ocr_page(str(tmp), page_num=page)
-    finally:
-        tmp.unlink(missing_ok=True)
+        text = _ocr_page_crop(doc, page, box)
+    except ValueError as e:
+        abort(404, str(e))
+    except Exception as e:  # OCR/backend failure -> JSON error, not a crash
+        return jsonify({"ok": False, "error": str(e)}), 502
 
-    added = append_bbox_items(doc, page, result["text"])
+    added = append_bbox_items(doc, page, text)
     save_doc(doc)
     return jsonify({"ok": True, "doc": doc, "added": added})
+
+
+@app.route("/item/<doc_id>/<item_id>/caption", methods=["POST"])
+def item_caption(doc_id, item_id):
+    """OCR a drawn region and use it as the caption of a table item.
+
+    engine="glm" (default) runs ocr_page, "tesseract" the local CLI. The
+    result is parsed by parse_table_caption and replaces/adds the item's
+    caption and table_number.
+    """
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", doc_id):
+        abort(404)
+    doc = load_doc(doc_id)
+    if doc is None:
+        abort(404)
+    data = request.get_json(silent=True) or {}
+    try:
+        page = int(data.get("page", 1))
+        box = {k: float(data[k]) for k in ("x", "y", "w", "h")}
+    except (KeyError, TypeError, ValueError):
+        abort(400, "page, x, y, w, h required (fractions of the page, 0..1)")
+    engine = data.get("engine", "glm")
+    if engine not in ("glm", "tesseract"):
+        abort(400, "engine must be glm|tesseract")
+
+    item = next(
+        (it for pg in doc.get("pages", []) for it in pg["items"] if it["id"] == item_id),
+        None,
+    )
+    if item is None:
+        abort(404, f"item {item_id} not found")
+    if item.get("type") != "table":
+        abort(400, "caption applies to table items only")
+
+    try:
+        tmp = _render_crop(doc, page, box)
+        try:
+            if engine == "tesseract":
+                result = tesseract_ocr(str(tmp))
+            else:
+                result = ocr_page(str(tmp), page_num=page)
+        finally:
+            tmp.unlink(missing_ok=True)
+    except ValueError as e:
+        abort(404, str(e))
+    except Exception as e:  # OCR/backend failure -> JSON error, not a 500
+        return jsonify({"ok": False, "error": str(e)}), 502
+
+    caption, table_number = parse_table_caption(unwrap_html_caption(result["text"]))
+    if caption is None:
+        return jsonify({"ok": False, "error": "no caption text in the selected region"}), 400
+    item["caption"] = caption
+    item["table_number"] = table_number
+    save_doc(doc)
+    return jsonify({"ok": True, "doc": doc, "caption": caption, "table_number": table_number})
 
 
 @app.route("/jobs/<job_id>")

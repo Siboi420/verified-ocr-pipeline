@@ -1,5 +1,6 @@
 """Runnable assert-based check for itemizer. Run: python3 test_itemizer.py"""
 import itemizer  # pyright: ignore[reportMissingImports] — same-dir module
+from pathlib import Path
 
 MD = """# Sample doc
 --- Page 1 ---
@@ -63,6 +64,55 @@ def main():
     # Empty input -> no pages.
     check(itemizer.parse_document("", "d") == [], "empty markdown -> no pages")
     check(itemizer.parse_document("--- Page 1 ---", "d") == [], "empty page -> dropped")
+
+    # Fixture: real OCR output of testOCR7page.pdf (Tables 21.2.1/21.2.2/21.2.3).
+    fixture = Path(__file__).parent / "test-ocr-files" / "testOCR7page.md"
+    if fixture.exists():
+        fpages = itemizer.parse_document(fixture.read_text(), "test7")
+        for page, num in [(1, "21.2.1"), (3, "21.2.2"), (4, "21.2.3")]:
+            pg = next(p for p in fpages if p["page"] == page)
+            tbl = next((it for it in pg["items"]
+                        if it["type"] == "table" and it.get("table_number") == num), None)
+            check(tbl is not None, f"page {page} table {num} auto-paired")
+            if tbl is not None:
+                check(tbl["caption"].strip().startswith(f"Table {num}—"),
+                      f"page {page} caption non-empty")
+            check(not any(it["type"] == "text" and it["content"].strip().startswith("Table ")
+                          for it in pg["items"]),
+                  f"page {page}: no standalone caption text item")
+    else:
+        print("  skip: test-ocr-files/testOCR7page.md fixture missing")
+
+    # Edge: caption followed by prose stays a text item.
+    md_prose = """--- Page 1 ---
+Table 99.1—Not a table, prose follows
+
+Some explanatory text.
+
+| A | B |
+|---|---|
+| 1 | 2 |
+"""
+    pp = itemizer.parse_document(md_prose, "d")[0]["items"]
+    t = next(it for it in pp if it["type"] == "table")
+    check("caption" not in t, "caption followed by prose stays a text item")
+    check(any(it["type"] == "text" and "Table 99.1" in it["content"] for it in pp),
+          "caption line remains a text item")
+
+    # parse_table_caption: empty -> (None, None); caption+number; fallback line.
+    check(itemizer.parse_table_caption("") == (None, None),
+          "parse_table_caption empty -> (None, None)")
+    check(itemizer.parse_table_caption("Table 21.2.1—Strength reduction factors")
+          == ("Table 21.2.1—Strength reduction factors", "21.2.1"),
+          "parse_table_caption caption with number")
+    check(itemizer.parse_table_caption("Member capacities") == ("Member capacities", None),
+          "parse_table_caption fallback: first non-empty line, no number")
+    html_cap = '<table border="1"><tr><td>Table 21.2.1—Strength reduction factors $\\phi$</td></tr></table>'
+    check(itemizer.unwrap_html_caption(html_cap)
+          == "Table 21.2.1—Strength reduction factors $\\phi$",
+          "unwrap_html_caption: single-cell HTML table -> cell text")
+    check(itemizer.unwrap_html_caption("plain text") == "plain text",
+          "unwrap_html_caption: non-HTML text unchanged")
 
     print("itemizer: all checks passed")
 

@@ -5,9 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>OCR Validation</title>
 <script>
-window.MathJax = {tex: {inlineMath: [["\\(", "\\)"]]}, svg: {fontCache: "global"}};
+window.MathJax = {tex: {inlineMath: [["\\(", "\\)"], ["$", "$"]]}};
 </script>
-<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js" async></script>
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js" async></script>
 <style>
   :root { --line:#ccc; --muted:#666; --bg:#f7f7f7; }
   * { box-sizing: border-box; }
@@ -38,6 +38,7 @@ window.MathJax = {tex: {inlineMath: [["\\(", "\\)"]]}, svg: {fontCache: "global"
   .badge.skipped { background:#f3f4f6; color:#374151; }
   .content { margin: 8px 0; white-space: pre-wrap; font-size: 14px; }
   .mathbox { overflow-x: auto; }
+  .caption { font-weight: 600; margin: 6px 0 4px; }
   table.grid { border-collapse: collapse; width: 100%; }
   table.grid input { width: 100%; border: 1px solid #ddd; border-radius: 3px; padding: 3px 5px; font-size: 13px; }
   .actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
@@ -63,6 +64,12 @@ window.MathJax = {tex: {inlineMath: [["\\(", "\\)"]]}, svg: {fontCache: "global"
   <span class="muted">default review: equations + tables</span>
   <label class="muted"><input type="checkbox" id="showMath"> show inline math</label>
   <label class="muted"><input type="checkbox" id="showText"> show text</label>
+  <label class="muted">caption box OCR:
+    <select id="captionEngine">
+      <option value="glm" selected>GLM</option>
+      <option value="tesseract">Tesseract</option>
+    </select>
+  </label>
   <span style="flex:1"></span>
   <button id="bboxBtn" title="drag on the page to OCR that region only">Draw box</button>
   <button id="bulkSkip">Pass for now (selected)</button>
@@ -268,6 +275,13 @@ function renderItem(it) {
     el.appendChild(box);
     if (window.MathJax) MathJax.typesetPromise([box]);
   } else if (it.type === "table") {
+    if (it.caption) {
+      const cap = document.createElement("div");
+      cap.className = "caption";
+      cap.textContent = it.caption;
+      el.appendChild(cap);
+      if (window.MathJax) MathJax.typesetPromise([cap]);
+    }
     renderEditor(el, it.content);
   } else {
     const pre = document.createElement("pre");
@@ -284,6 +298,13 @@ function renderItem(it) {
     <button class="act edit">Edit + Accept</button>
     <button class="act reject">Reject</button>
     <button class="act skip">Skip</button>`;
+  if (it.type === "table") {
+    const capBox = document.createElement("button");
+    capBox.className = "act capbox";
+    capBox.title = "drag on the page to OCR that caption region (uses the caption box engine)";
+    capBox.textContent = "Draw caption box";
+    actions.appendChild(capBox);
+  }
   el.appendChild(actions);
   return el;
 }
@@ -405,6 +426,14 @@ document.getElementById("items").addEventListener("click", async e => {
   const el = e.target.closest(".item");
   const itemId = el.dataset.id;
   const cls = btn.className;
+  if (cls.includes("capbox")) {
+    // enter bbox mode targeted at this table's caption
+    captionItemId = itemId;
+    bboxMode = true;
+    bboxBtn.textContent = "Drawing…";
+    bboxSel.style.display = "none";
+    return;
+  }
   if (cls.includes("edit")) {
     if (itemEditorOpen(el)) {
       await act(itemId, "accept", itemContent(el)); // Edit+Accept: save edited content
@@ -453,6 +482,7 @@ document.getElementById("nextPg").addEventListener("click", () => {
 /* ---------- bounding-box OCR ---------- */
 let bboxMode = false;
 let bboxStart = null;
+let captionItemId = null;  // non-null while bbox is targeting a table caption
 
 function imgFrac(e) {
   const r = document.getElementById("pageImg").getBoundingClientRect();
@@ -472,6 +502,7 @@ const bboxBtn = document.getElementById("bboxBtn");
 const bboxSel = document.getElementById("bboxSel");
 
 bboxBtn.addEventListener("click", () => {
+  captionItemId = null;  // plain Draw box: not a caption capture
   bboxMode = !bboxMode;
   bboxBtn.textContent = bboxMode ? "Drawing…" : "Draw box";
   bboxSel.style.display = "none";
@@ -496,14 +527,33 @@ window.addEventListener("mousemove", e => {
 window.addEventListener("mouseup", async e => {
   if (!bboxMode || !bboxStart) return;
   const r = bboxRect(e);
+  const capId = captionItemId;
   bboxStart = null;
   bboxMode = false;
+  captionItemId = null;
   bboxBtn.textContent = "Draw box";
   bboxSel.style.display = "none";
   if (r.w < 0.01 || r.h < 0.01) return;
   const bar = document.getElementById("ocrbar");
   bar.style.display = "block";
   bar.className = "";
+  if (capId) {
+    bar.textContent = "OCR of caption region in progress…";
+    try {
+      const out = await post(`/item/${DOC.doc_id}/${capId}/caption`, {
+        page: pageNo, ...r,
+        engine: document.getElementById("captionEngine").value,
+      });
+      Object.assign(DOC, out.doc);
+      bar.textContent = "caption updated";
+      setTimeout(() => bar.style.display = "none", 2500);
+      render();
+    } catch (err) {
+      bar.className = "err";
+      bar.textContent = "caption OCR failed: " + err.message;
+    }
+    return;
+  }
   bar.textContent = "OCR of region in progress…";
   try {
     const out = await post(`/bbox_ocr/${DOC.doc_id}`, {page: pageNo, ...r});

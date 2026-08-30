@@ -27,6 +27,7 @@ $$
 M_u = 1.2 M_d + 1.6 M_l
 $$
 
+Table 1.2—Member capacities
 | Member | Capacity (kN) |
 |--------|---------------|
 | B1     | 245.3         |
@@ -90,11 +91,19 @@ def main():
           "page 1 order: equation, table, text(with math), text, text (title merged)")
     check(p1[2]["has_inline_math"], "inline math flagged on trailing prose")
     check(pending["n_pages"] == 2, "n_pages from PyMuPDF = 2")
+    table_item = p1[1]
+    check(table_item.get("caption") == "Table 1.2—Member capacities",
+          "table item carries auto-paired caption")
+    check(table_item.get("table_number") == "1.2", "table item carries table_number")
 
     # /doc/<id>
     r = client.get(f"/doc/{doc_id}")
-    check(r.status_code == 200 and 'id="main"' in r.get_data(as_text=True),
+    html = r.get_data(as_text=True)
+    check(r.status_code == 200 and 'id="main"' in html,
           "/doc/smoke renders review page")
+    check("tex-chtml.js" in html and "tex-svg.js" not in html,
+          "review page uses MathJax CHTML")
+    check('id="captionEngine"' in html, "review page has caption engine select")
 
     # page PNG
     r = client.get(f"/page/{doc_id}/1.png")
@@ -109,6 +118,9 @@ def main():
     verified = read_json(REPO / "validation" / "verified" / f"{table_id}.json")
     check(verified["content"] == EDITED_TABLE, "verified JSON holds edited markdown")
     check(verified["type"] == "table" and verified["page"] == 1, "verified metadata correct")
+    check(verified.get("caption") == "Table 1.2—Member capacities",
+          "verified JSON carries caption")
+    check(verified.get("table_number") == "1.2", "verified JSON carries table_number")
     pending = read_json(REPO / "validation" / "pending" / "smoke.json")
     check(next(i for i in pending["pages"][0]["items"] if i["id"] == table_id)["status"] == "verified",
           "pending doc marks item verified")
@@ -145,6 +157,17 @@ def main():
     r = client.post(f"/bbox_ocr/{doc_id}", json={"page": 99, "x": 0, "y": 0, "w": .5, "h": .5})
     check(r.status_code == 404, "bbox OCR rejects out-of-range page")
 
+    # caption route input validation (no live OCR call)
+    r = client.post(f"/item/{doc_id}/{table_id}/caption", json={"x": .2, "y": .2})
+    check(r.status_code == 400, "caption route rejects missing coords")
+    r = client.post(f"/item/{doc_id}/{table_id}/caption", json={"page": 99, "x": 0, "y": 0, "w": .5, "h": .5})
+    check(r.status_code == 404, "caption route rejects out-of-range page")
+    r = client.post(f"/item/{doc_id}/{eq_id}/caption", json={"page": 1, "x": 0, "y": 0, "w": .5, "h": .5})
+    check(r.status_code == 400, "caption route rejects non-table item")
+    r = client.post(f"/item/{doc_id}/{table_id}/caption",
+                    json={"page": 1, "x": 0, "y": 0, "w": .5, "h": .5, "engine": "wat"})
+    check(r.status_code == 400, "caption route rejects invalid engine")
+
     # upload without .md -> async OCR job; key unset -> clear error
     try:
         pdf_bytes = open(pdf_path, "rb").read()
@@ -175,7 +198,10 @@ def main():
 
     # GET / still lists the loaded doc
     r = client.get("/")
-    check(r.status_code == 200 and "smoke" in r.get_data(as_text=True), "/ lists documents")
+    idx = r.get_data(as_text=True)
+    check(r.status_code == 200 and "smoke" in idx, "/ lists documents")
+    check("tex-chtml.js" in idx and "tex-svg.js" not in idx,
+          "index uses MathJax CHTML")
 
     # discard document: pending record + verified/rejected item copies removed
     r = client.post(f"/doc/{doc_id}/discard")

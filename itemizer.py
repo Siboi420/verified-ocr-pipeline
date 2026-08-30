@@ -14,6 +14,8 @@ EQUATION_RE = re.compile(r"\$\$(.+?)\$\$|\\\[(.+?)\\\]", re.DOTALL)
 TABLE_ROW_RE = re.compile(r"^\s*\|.*\|\s*$")
 TABLE_SEP_RE = re.compile(r"^\s*\|[\s:|-]+\|\s*$")
 INLINE_MATH_RE = re.compile(r"\\\(.+?\\\)|\$[^$\n]+\$")
+# A caption line: "Table 21.2.1—..." (em dash/dash/space after the number).
+TABLE_CAPTION_RE = re.compile(r"^\s*Table\s+(\d+(?:\.\d+)*)\b(.*)$", re.IGNORECASE)
 
 HTML_TABLE_RE = re.compile(r"<table\b.*?</table\s*>", re.IGNORECASE | re.DOTALL)
 
@@ -78,32 +80,108 @@ def _extract_equations(body):
     return spans, rest
 
 
-def _extract_tables(body):
-    """Pull pipe-table blocks out of the body.
+def parse_table_caption(text):
+    """Parse caption-box OCR text into (caption_text, table_number).
 
-    Returns (tables, remaining_text); a table is the raw block of consecutive
-    pipe rows containing a |-...-| separator row with >= 2 rows total.
+    A line starting "Table N.N.N …" wins (the full line is the caption, the
+    number is extracted). Otherwise the first non-empty line becomes the
+    caption with table_number=None (manual caption-box path). Whitespace-only
+    text returns (None, None).
+    """
+    if not text or not text.strip():
+        return None, None
+    lines = [ln.strip() for ln in text.strip().splitlines()]
+    for ln in lines:
+        m = TABLE_CAPTION_RE.match(ln)
+        if m:
+            return ln, m.group(1)
+    return lines[0], None
+
+
+def unwrap_html_caption(text):
+    """If text is an HTML table (GLM wraps tiny crops), strip tags and keep
+    the text lines. The caption box is drawn around one line, so the first
+    remaining text line is the caption."""
+    if not text.lstrip().lower().startswith("<table"):
+        return text
+    plain = re.sub(r"<[^>]+>", "", text)
+    return "\n".join(ln.strip() for ln in plain.splitlines() if ln.strip())
+
+
+def _extract_tables(body):
+    """Pull pipe-table blocks out of the body in one pass.
+
+    A "Table N.N.N …" line is held as a pending caption across blank lines
+    (ACI captions sit one blank line above the table); when the next pipe
+    block closes as a valid table the caption is consumed and attached to it.
+    A pending caption followed by anything else is flushed back into the text
+    stream.
+
+    Returns (tables, remaining_text, caption_pairs) where caption_pairs is a
+    list of (table_number, caption_text) parallel to tables — (None, None)
+    for tables without a caption.
     """
     tables = []
+    caption_pairs = []
     kept = []
     block = []
+    pending = None  # (caption_text, table_number) awaiting a table below
+    pending_blanks = 0  # blank lines after the caption, emitted only on flush
     lines = body.splitlines()
+
+    def flush_pending():
+        nonlocal pending, pending_blanks
+        if pending is not None:
+            kept.append(pending[0])
+            if pending_blanks:
+                kept.extend([""] * pending_blanks)
+            pending = None
+            pending_blanks = 0
+
+    def attach_pending():
+        nonlocal pending, pending_blanks
+        caption_pairs.append((pending[1], pending[0]) if pending else (None, None))
+        pending = None
+        pending_blanks = 0
+
     for line in lines:
         if TABLE_ROW_RE.match(line):
             block.append(line)
-        else:
-            if block and _is_table(block):
+            continue
+        if block:  # non-pipe line closes the current block
+            if _is_table(block):
+                attach_pending()
                 tables.append("\n".join(block))
-            elif block:
+            else:
+                flush_pending()
                 kept.extend(block)
             block = []
-            kept.append(line)
+        m = TABLE_CAPTION_RE.match(line)
+        if m:
+            if pending is not None:
+                flush_pending()  # previous caption wasn't for this table
+            pending = (line, m.group(1))
+            pending_blanks = 0
+            continue
+        if not line.strip():
+            if pending is not None:
+                pending_blanks += 1  # blank line: keep the caption alive
+            else:
+                kept.append(line)
+            continue
+        if pending is not None:
+            flush_pending()  # caption followed by prose: back to text
+        kept.append(line)
     if block:
         if _is_table(block):
+            attach_pending()
             tables.append("\n".join(block))
         else:
+            flush_pending()
             kept.extend(block)
-    return tables, "\n".join(kept)
+    else:
+        flush_pending()  # trailing caption with no table below
+    return tables, "\n".join(kept), caption_pairs
 
 
 def _is_table(rows):
@@ -164,14 +242,19 @@ def parse_document(markdown, doc_id=""):
     for page_num, body in _split_pages(markdown):
         html_tables, body = _extract_html_tables(body)
         equations, rest = _extract_equations(body)
-        tables, rest = _extract_tables(rest)
+        tables, rest, caption_pairs = _extract_tables(rest)
         paragraphs = [p for p in _extract_text(rest)]
 
         items = []
         for eq in equations:
             items.append({"type": "equation", "content": eq, "has_inline_math": False})
-        for t in tables:
-            items.append({"type": "table", "content": t, "has_inline_math": False})
+        for i, t in enumerate(tables):
+            item = {"type": "table", "content": t, "has_inline_math": False}
+            num, cap = caption_pairs[i] if i < len(caption_pairs) else (None, None)
+            if cap is not None:
+                item["caption"] = cap
+                item["table_number"] = num
+            items.append(item)
         for ht in html_tables:
             md = _html_to_markdown(ht)
             if md:

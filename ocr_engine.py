@@ -81,6 +81,33 @@ def pdf_to_images(pdf_path, dpi=200, page_range=None):
 
 # ── OCR a single page ───────────────────────────────────────────────────────
 
+def tesseract_ocr(image_path, lang="eng"):
+    """OCR a single image with the system tesseract CLI (no pip dependency).
+
+    Returns {"text": ...}. Raises RuntimeError if tesseract is not installed
+    or fails.
+    """
+    import shutil
+    import subprocess
+
+    if shutil.which("tesseract") is None:
+        raise RuntimeError(
+            "tesseract not found on PATH: install tesseract-ocr to use the "
+            "Tesseract caption engine (GLM stays the default)"
+        )
+    proc = subprocess.run(
+        ["tesseract", str(image_path), "stdout", "-l", lang],
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"tesseract failed (rc={proc.returncode}): {proc.stderr.strip()[:200]}"
+        )
+    return {"text": proc.stdout.strip()}
+
+
 def _require_key():
     """Fail early with a clear message when running a real OCR call without a key."""
     if not API_KEY:

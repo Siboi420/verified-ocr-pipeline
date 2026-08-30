@@ -31,6 +31,13 @@ Flask web UI at localhost:5000
 - Verified items go to ~/Projects/seismic-ai-tools/validation/verified/
 - Pending items in ~/Projects/seismic-ai-tools/validation/pending/
 
+Double-column pages (e.g. ACI CODE / COMMENTARY layouts): the app does **not**
+differentiate columns. `ocr_engine.py` sends one full-page image to GLM-OCR
+and gets a single linearized markdown stream; `itemizer.py` only splits on
+`--- Page N ---` separators. CODE and COMMENTARY content are therefore
+interleaved, with loose `CODE`/`COMMENTARY` headings kept as ordinary text
+(see `test-ocr-files/testOCR7page.md`).
+
 ## Orchestrator
 
 ~/Projects/seismic-ai-tools/orchestrator.py
