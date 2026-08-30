@@ -134,7 +134,10 @@ def render_markdown(items):
     their introducing provision statement folded in ("**22.5.1.2**
     Cross-sectional dimensions…") so the chunk carries the provision it
     implements, and a missing section anchor is backfilled from the equation
-    key's own dotted prefix (an ACI eq number encodes its section)."""
+    key's own dotted prefix (an ACI eq number encodes its section).
+    Tables get their caption folded in ("Table 22.5.5.1—…") — the query-
+    matchable words their pipe/LaTeX content lacks — and their section is
+    backfilled from the table number."""
     header = f"# {items[0]['source_name']}\n"
     # provision statements per page, keyed by their dotted number. Equation
     # chunks fold the matching statement — position-independent, because
@@ -164,10 +167,13 @@ def render_markdown(items):
             title += f" · eq({it['eq_num']})"
         # section is the full dotted heading ("5.3", "22.5.1.2"); chapter is
         # only a context fallback when no dotted heading was stamped. Equation
-        # keys encode their own section, so backfill missing anchors from them.
+        # keys encode their own section, and a table number does too — both
+        # backfill missing anchors.
         sec = it.get("section") or it.get("chapter")
         if sec is None and it.get("type") == "equation":
             sec = _eq_section(it.get("eq_num"))
+        if sec is None and it.get("type") == "table" and it.get("table_number"):
+            sec = it["table_number"]
         if sec:
             title += f" — {sec}"
         fold = ""
@@ -182,7 +188,10 @@ def render_markdown(items):
                     if fold:
                         break
         header_note = f"\n\n{fold}" if fold else ""
-        body.append(f"{title}{header_note}\n\n{content}")
+        # the table caption is the chunk's only plain-words surface (query-
+        # matchable), so keep it above the pipe/LaTeX content
+        cap_note = f"\n\n{it['caption']}" if it.get("type") == "table" and it.get("caption") else ""
+        body.append(f"{title}{header_note}{cap_note}\n\n{content}")
     return header + "\n\n".join(body) + "\n"
 
 
@@ -248,7 +257,8 @@ def _selftest():
              "eq_num": "22.5.6.3.1c", "content": "V_{ci} = 0.17\\lambda \\sqrt{f'_c}b_wd"}))
         (td / "b-p3-i4.json").write_text(json.dumps(
             {"doc_id": "b", "item_id": "b-p3-i4", "page": 3, "type": "table",
-             "chapter": None, "section": "4.1.1", "source_name": "b.pdf",
+             "chapter": None, "section": None, "source_name": "b.pdf",
+             "table_number": "4.1.1", "caption": "Table 4.1.1—Cap",
              "content": "|x|y|"}))
         (td / "junk.json").write_text("{corrupt")
         by_doc = docs_from_verified(td)
@@ -268,6 +278,8 @@ def _selftest():
         # R-commentary has no key, so _stmt_key returns None for it
         assert _stmt_key("**R22.5.1.2** The limit on cross") is None
         md_b = render_markdown(by_doc["b"])
+        # table: no section -> backfilled from table_number; caption folded in
+        assert "## page 3 table — 4.1.1\n\nTable 4.1.1—Cap\n\n|x|y|" in md_b, md_b
         assert "4.1.1" in md_b and "|x|y|" in md_b
     print("selftest: ok")
 

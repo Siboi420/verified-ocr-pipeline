@@ -126,7 +126,11 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   provision for sub-lettered equations and to the previous page where a provision
   starts; multiple same-key statements prefer the provision (“shall…”) over
   R-commentary (“is assumed…”); R-commentary equations and unverified
-  statements stay unfolded — current ACI export: 43 eq chunks, 30 folded). Items
+  statements stay unfolded — current ACI export: 43 eq chunks, 30 folded).
+  Table chunks get the same treatment: caption folded in above the pipe/LaTeX
+  content (the chunk's only plain-words, query-matchable surface — the
+  Table 22.5.5.1 retrieval miss was an uncaptioned table chunk) and section
+  backfilled from `table_number` (11 table chunks, 9 with a caption). Items
   order by the numeric index of `item_id` (lexical sort put i10
   before i2)
   and uploads to an Unsloth Studio RAG KB (`/api/rag/knowledge-bases`, name via
