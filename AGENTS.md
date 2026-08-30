@@ -32,7 +32,8 @@ Two things live here:
    item-by-item (tables, equations, text), accepting/editing/rejecting, and writing
    verified JSON.
 2. **Supporting tooling** — `ocr_engine.py` (GLM-OCR client), `itemizer.py` (OCR
-   markdown → review items), config, schemas (empty), docs.
+   markdown → review items), `rag_uploader.py` (verified JSON → Unsloth RAG KB),
+   config, schemas (empty), docs.
 
 Related but separate: `~/Projects/StructuralEngineeringWorkspace/` (OpenSeesPy research,
 has its own AGENTS.md). This app is the human-review step feeding that research.
@@ -70,6 +71,14 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1) or /load (paths to pdf+m
   `/ocr/<doc_id>` (async job), `/jobs/<id>` (poll), `/doc/<id>` (review page),
   `/page/<doc_id>/<n>.png` (rendered, cached), `/item/.../action`, `/bulk`.
   Jobs are an **in-memory dict** — lost on restart.
+- `rag_uploader.py` — reads `validation/verified/*.json`, groups items by
+  `doc_id`, renders one markdown file per source doc (`source_name` header, per-item
+  `## page N <type> — <section>` titles, section is the full dotted heading)
+  and uploads to an Unsloth Studio RAG KB (`/api/rag/knowledge-bases`, name via
+  `--kb`, default "Verified OCR"). Server-side chunking + embeddings. Skips
+  unreadable JSON **and stale pre-metadata exports** (missing `source_name` — the
+  old bbox-OCR artifacts) with warnings. `--selftest` for offline checks,
+  `--dry-run` to render without uploading. Requires `UNSLOTH_API_KEY`.
 - `config.py` — `API_BASE` (default `http://localhost:8888`), `API_KEY` (env-only),
   `MODEL = "ggml-org/GLM-OCR-GGUF"`, `UPLOAD_DIR`.
 - `ocr_engine.py` — `pdf_to_images(dpi=200)`, `ocr_page`/`ocr_batch(workers=2)`,
