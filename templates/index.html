@@ -152,6 +152,11 @@ function stepPage(dir) {           // dir: -1 prev, +1 next
   cursorId = null;
   render();
 }
+
+function pageLabel(n) {           // display number: position in OCR'd list when filtered
+  if (!onlyOcr) return n;
+  return navPages().indexOf(n) + 1;
+}
 const autoOcr = async () => {
   const bar = document.getElementById("ocrbar");
   if (!bar) return;
@@ -390,14 +395,17 @@ function render() {
   sel.innerHTML = "";
   for (const n of navPages()) {
     const opt = document.createElement("option");
-    opt.value = n; opt.textContent = n;
+    opt.value = n; opt.textContent = pageLabel(n);
     if (n === pageNo) opt.selected = true;
     sel.appendChild(opt);
   }
-  document.getElementById("pageTotal").textContent = DOC.n_pages;
+  const nav = navPages();
+  document.getElementById("pageTotal").textContent =
+    onlyOcr ? nav.length : DOC.n_pages;
   document.getElementById("pageImg").src = `/page/${DOC.doc_id}/${pageNo}.png`;
-  document.getElementById("pgInfo").textContent =
-    `page ${pageNo} of ${DOC.n_pages} (rendered at 200 dpi)`;
+  document.getElementById("pgInfo").textContent = onlyOcr
+    ? `page ${pageLabel(pageNo)} of ${nav.length} (OCR'd; actual ${pageNo} of ${DOC.n_pages}, rendered at 200 dpi)`
+    : `page ${pageNo} of ${DOC.n_pages} (rendered at 200 dpi)`;
 
   const showMath = document.getElementById("showMath").checked;
   const showText = document.getElementById("showText").checked;

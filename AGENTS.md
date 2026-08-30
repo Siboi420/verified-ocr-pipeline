@@ -127,7 +127,10 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   An "OCR'd pages only" checkbox (`onlyOcr`) restricts `#pageSel` and prev/next to
   pages in `DOC.pages` (pages with ≥1 item; falls back to all pages when there are
   none), via `navPages()` (filtered list or full 1..n) and `stepPage(dir)` (steps the
-  same list, defaulting to first/last when off it). Two per-page bulk buttons reuse
+  same list, defaulting to first/last when off it). When the filter is on, the page
+  selector and `#pageTotal` show the *position within the OCR'd pages* (`pageLabel()`,
+  e.g. "2 of 3") instead of the absolute page number; `#pgInfo` keeps the actual page
+  for reference. Two per-page bulk buttons reuse
   the existing `/bulk` accept route with computed `item_ids`: `bulkAcceptMath`/
   `bulkAcceptText` (→ `bulkAcceptType(kind)`) accept every current-page text item
   with/without `has_inline_math` that isn't verified/rejected (works regardless of
