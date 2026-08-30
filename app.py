@@ -13,7 +13,7 @@ from pathlib import Path
 from flask import Flask, abort, jsonify, redirect, render_template, request, send_file  # pyright: ignore[reportMissingImports] — env lacks flask; runtime python3 has it
 
 import config
-from itemizer import parse_document, parse_table_caption, pick_caption_from_band, unwrap_html_caption  # pyright: ignore[reportMissingImports] — same-dir module
+from itemizer import clean_export_text, parse_document, parse_table_caption, pick_caption_from_band, unwrap_html_caption  # pyright: ignore[reportMissingImports] — same-dir module
 from ocr_engine import CAPTION_BAND_PROMPT, assemble_markdown, ocr_batch, ocr_page, pdf_to_images, tesseract_ocr
 
 BASE = Path(__file__).resolve().parent
@@ -110,7 +110,10 @@ def apply_action(doc, item_id, action, content=None):
                     "item_id": item_id,
                     "page": page["page"],
                     "type": item["type"],
-                    "content": final,
+                    "chapter": item.get("chapter"),
+                    "section": item.get("section"),
+                    "source_name": doc.get("source_name", ""),
+                    "content": clean_export_text(final),
                 }
                 if item.get("caption") is not None:
                     payload["caption"] = item["caption"]

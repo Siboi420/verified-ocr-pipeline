@@ -22,7 +22,8 @@ REPO = Path(__file__).resolve().parent
 
 MARKDOWN = """# Smoke
 --- Page 1 ---
-The frame carries a moment:
+CHAPTER 5
+5.3 The frame carries a moment:
 $$
 M_u = 1.2 M_d + 1.6 M_l
 $$
@@ -95,6 +96,10 @@ def main():
     check(table_item.get("caption") == "Table 1.2—Member capacities",
           "table item carries auto-paired caption")
     check(table_item.get("table_number") == "1.2", "table item carries table_number")
+    check(table_item.get("section") == "5.3" and table_item.get("chapter") == "5",
+          "table item carries section=5.3, chapter=5 from the heading")
+    check(p1[0].get("section") == "5.3" and p1[0].get("chapter") == "5",
+          "equation item inherits section/chapter too")
 
     # /doc/<id>
     r = client.get(f"/doc/{doc_id}")
@@ -121,6 +126,10 @@ def main():
     check(verified.get("caption") == "Table 1.2—Member capacities",
           "verified JSON carries caption")
     check(verified.get("table_number") == "1.2", "verified JSON carries table_number")
+    check(verified.get("section") == "5.3" and verified.get("chapter") == "5",
+          "verified JSON carries section/chapter from the item")
+    check(verified.get("source_name") == "smoke.pdf", "verified JSON carries source_name")
+    check("# OCR:" not in verified["content"], "verified content has no # OCR: title")
     pending = read_json(REPO / "validation" / "pending" / "smoke.json")
     check(next(i for i in pending["pages"][0]["items"] if i["id"] == table_id)["status"] == "verified",
           "pending doc marks item verified")
@@ -137,6 +146,17 @@ def main():
     pending = read_json(REPO / "validation" / "pending" / "smoke.json")
     it = next(i for i in pending["pages"][0]["items"] if i["id"] == text_id)
     check(r.status_code == 200 and it["status"] == "skipped", "skip keeps item pending/skipped")
+
+    # accept a text item: OCR boilerplate is cleaned out of the exported content
+    text_payload = "# OCR: smoke.md\n\nCODE\n\nThis is the frame capacity prose.\n\n**Commentary**\n"
+    r = client.post(f"/item/{doc_id}/{text_id}/action",
+                    json={"action": "accept", "content": text_payload})
+    check(r.status_code == 200, "accept text item 200")
+    tv = read_json(REPO / "validation" / "verified" / f"{text_id}.json")
+    check(tv["content"] == "\n\nThis is the frame capacity prose.\n",
+          "accepted text export drops # OCR:/CODE/**Commentary** lines")
+    check(tv.get("section") == "5.3" and tv.get("source_name") == "smoke.pdf",
+          "text export carries section/source_name")
 
     # bulk pass-for-now over remaining pending items on the doc
     r = client.post("/bulk", json={"doc_id": doc_id, "action": "skip",

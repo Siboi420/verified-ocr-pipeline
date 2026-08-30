@@ -60,6 +60,11 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1) or /load (paths to pdf+m
   (`$$...$$` / `\[...\]`), **pipe tables and HTML `<table>...</table>`** (added to fix
   GLM-OCR answering HTML tables; HTML converted to `|...|` markdown), inline math
   (`\(...\)` / `$...$`). Item order: equation → table → text-math → text, per page.
+  Every item carries `chapter`/`section` (nearest preceding `CHAPTER N` / dotted
+  heading, `R21.2.1` kept, both reset per page; line-start anchored so inline
+  refs/decimals never match). `clean_export_text()` strips `# OCR:` titles and
+  standalone CODE/COMMENTARY markers — applied **at export only** (verified JSON,
+  not the review UI/doc).
 - `templates/index.html` — single-page JS UI. Has an `autoOcr()` + `?ocr=1` gate
   (upload PDF-only → auto-starts OCR). `post()`, `pollJob()` helpers. **Note:**
   `location.reload()` refreshes DOC after OCR job completes (deliberate; the old
@@ -96,8 +101,8 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1) or /load (paths to pdf+m
 
 ## Tests / verification
 
-- `python3 test_itemizer.py` — 17 itemizer assertions.
-- `python3 smoke_test.py` — 21 end-to-end checks via Flask test client (no live OCR;
+- `python3 test_itemizer.py` — 61 itemizer assertions.
+- `python3 smoke_test.py` — 46 end-to-end checks via Flask test client (no live OCR;
   asserts `?ocr=1` redirect, no-key OCR error, etc.).
 - A quick GPU/alive check: `curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:5000/`
   (app) and `:8888` (unsloth); `nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader`

@@ -244,7 +244,7 @@ function itemEditorOpen(el) {
 function itemContent(el) {
   const ed = el.querySelector(".editor");
   if (ed) {
-    if (ed.dataset.kind === "table") return tableToMarkdown(el);
+    if (ed.dataset.kind === "table") return tableToMarkdown(ed);
     return ed.querySelector("textarea").value;
   }
   return el.dataset.content;
