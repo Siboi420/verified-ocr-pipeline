@@ -1,0 +1,582 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OCR Validation</title>
+<script>
+window.MathJax = {tex: {inlineMath: [["\\(", "\\)"]]}, svg: {fontCache: "global"}};
+</script>
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js" async></script>
+<style>
+  :root { --line:#ccc; --muted:#666; --bg:#f7f7f7; }
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, sans-serif; margin: 0; background: var(--bg); color: #222; }
+  .wrap { max-width: 1500px; margin: 0 auto; padding: 16px; }
+  header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin-bottom: 12px; }
+  header h1 { font-size: 20px; margin: 0; }
+  .muted { color: var(--muted); font-size: 13px; }
+  button { cursor: pointer; padding: 4px 10px; border: 1px solid var(--line); border-radius: 4px; background: #fff; }
+  button:hover { background: #eee; }
+  input[type=text], input[type=file], textarea, select { border: 1px solid var(--line); border-radius: 4px; padding: 4px 6px; }
+  .card { background: #fff; border: 1px solid var(--line); border-radius: 6px; padding: 12px; margin-bottom: 16px; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  #main { display: flex; gap: 16px; align-items: flex-start; }
+  #pane { flex: 0 0 46%; max-width: 640px; position: sticky; top: 12px; }
+  #pane img { width: 100%; border: 1px solid var(--line); border-radius: 4px; background: #fff; }
+  #bboxSel { position: absolute; border: 2px solid #ef4444; background: rgba(239,68,68,.15);
+             pointer-events: none; display: none; z-index: 5; }
+  #items { flex: 1 1 auto; display: flex; flex-direction: column; gap: 10px; }
+  .item { border: 1px solid var(--line); border-radius: 6px; background: #fff; padding: 10px; }
+  .item.done { opacity: .55; }
+  .item.active { outline: 2px solid #3b82f6; }
+  .badge { display: inline-block; font-size: 11px; text-transform: uppercase; letter-spacing: .5px;
+           background: #eef2ff; color: #3730a3; border-radius: 3px; padding: 2px 6px; margin-right: 8px; }
+  .badge.table { background:#ecfdf5; color:#065f46; }
+  .badge.equation { background:#fff7ed; color:#9a3412; }
+  .badge.math { background:#fdf4ff; color:#86198f; }
+  .badge.skipped { background:#f3f4f6; color:#374151; }
+  .content { margin: 8px 0; white-space: pre-wrap; font-size: 14px; }
+  .mathbox { overflow-x: auto; }
+  table.grid { border-collapse: collapse; width: 100%; }
+  table.grid input { width: 100%; border: 1px solid #ddd; border-radius: 3px; padding: 3px 5px; font-size: 13px; }
+  .actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  .ok { color: #065f46; } .err { color: #991b1b; }
+  #ocrbar { display: none; padding: 8px 12px; border-radius: 6px; margin-bottom: 12px; background: #eff6ff; border: 1px solid #bfdbfe; }
+  .pill { font-size: 12px; background:#eef2ff; border-radius: 10px; padding: 2px 8px; }
+  button.discardList { padding: 2px 8px; font-size: 12px; color: #991b1b; }
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <h1>OCR Validation</h1>
+  {% if doc %}<span class="pill">{{ doc.source_name }}</span>
+  <span class="muted" id="counter"></span>{% endif %}
+</header>
+
+{% if doc %}
+<div id="ocrbar" class="err"></div>
+<div class="card row">
+  <label>Page <select id="pageSel"></select> / <span id="pageTotal"></span></label>
+  <button id="prevPg">‹ prev</button><button id="nextPg">next ›</button>
+  <span class="muted">default review: equations + tables</span>
+  <label class="muted"><input type="checkbox" id="showMath"> show inline math</label>
+  <label class="muted"><input type="checkbox" id="showText"> show text</label>
+  <span style="flex:1"></span>
+  <button id="bboxBtn" title="drag on the page to OCR that region only">Draw box</button>
+  <button id="bulkSkip">Pass for now (selected)</button>
+  <button id="bulkAccept">Accept selected</button>
+  <button id="discardBtn" title="delete this document from the queue">Discard document</button>
+  <a href="/"><button>‹ documents</button></a>
+</div>
+<div id="main">
+  <div id="pane"><img id="pageImg" alt="page" draggable="false"><div class="muted" id="pgInfo"></div><div id="bboxSel"></div></div>
+  <div id="items"></div>
+</div>
+{% else %}
+<div class="card">
+  <h3>Load existing files</h3>
+  <form action="/load" method="post" class="row">
+    <input type="text" name="pdf_path" placeholder="/path/to/doc.pdf" size="34" required>
+    <input type="text" name="md_path" placeholder="/path/to/ocr.md" size="34" required>
+    <button type="submit">Load</button>
+  </form>
+  <h3>Upload</h3>
+  <form id="upForm" class="row" method="post" enctype="multipart/form-data" action="/upload">
+    <input type="file" name="pdf" accept=".pdf" required>
+    <input type="file" name="md" accept=".md,.txt" title="optional: already-OCRed markdown">
+    <button type="submit">Upload</button>
+    <span class="muted" id="upStatus"></span>
+  </form>
+</div>
+<div class="card">
+  <h3>Documents</h3>
+  {% if docs %}
+  <table style="width:100%; border-collapse:collapse">
+    <tr class="muted"><th align="left">doc</th><th align="left">source</th><th>pages</th>
+      <th>pending</th><th>skipped</th><th>verified</th><th>rejected</th><th></th></tr>
+    {% for d in docs %}
+    <tr>
+      <td><a href="/doc/{{ d.doc_id }}">{{ d.doc_id }}</a></td>
+      <td class="muted">{{ d.source_name }}</td><td align="center">{{ d.n_pages }}</td>
+      <td align="center">{{ d.counts.pending }}</td><td align="center">{{ d.counts.skipped }}</td>
+      <td align="center">{{ d.counts.verified }}</td><td align="center">{{ d.counts.rejected }}</td>
+      <td align="center"><button class="discardList" data-id="{{ d.doc_id }}" title="delete scanned document">Discard</button></td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}<span class="muted">No documents yet.</span>{% endif %}
+</div>
+{% endif %}
+</div>
+
+<script>
+{% if doc %}
+const DOC = {{ doc | tojson }};
+const DOCS = null;
+let pageNo = 1;
+let cursorId = null;       // currently highlighted item id
+let lastFlatIdx = -1;      // flat index before last action (for advance)
+const autoOcr = async () => {
+  const bar = document.getElementById("ocrbar");
+  if (!bar) return;
+  const hasItems = (DOC.pages || []).some(p => (p.items || []).length > 0);
+  if (hasItems) return;
+  try {
+    bar.style.display = "block";
+    bar.textContent = "OCR in progress…";
+    const {job_id} = await post(`/ocr/${DOC.doc_id}`);
+    await pollJob(job_id, () => location.reload());
+  } catch (e) {
+    bar.textContent = "OCR failed: " + e.message;
+  }
+};
+// Only auto-OCR when the upload flow asked for it (?ocr=1); a plain
+// /doc/<id> link never triggers OCR even if the doc has no items.
+const needsOcr = new URLSearchParams(window.location.search).get("ocr") === "1";
+if (needsOcr) autoOcr();
+{% else %}
+const DOC = null;
+const DOCS = {{ docs | tojson }};
+{% endif %}
+
+/* ---------- helpers ---------- */
+async function post(url, body) {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(body || {}),
+  });
+  if (!res.ok) {
+    const txt = await res.text();
+    throw new Error(txt.length > 200 ? txt.slice(0, 200) : txt);
+  }
+  return res.json();
+}
+
+function flatItems() {
+  return (DOC.pages || []).flatMap(pg =>
+    pg.items.map(it => ({...it, page: pg.page})));
+}
+
+function escapePipe(s) { return s.replace(/\|/g, "\\|"); }
+function unescapePipe(s) { return s.replace(/\\\|/g, "|"); }
+
+/* ---------- table grid ---------- */
+function parseTable(md) {
+  const rows = md.trim().split("\n").map(r => r.trim()).filter(Boolean);
+  const cells = rows.map(r => {
+    const body = r.replace(/^\|/, "").replace(/\|$/, "");
+    return body.split(/(?<!\\)\|/).map(c => unescapePipe(c.trim()));
+  });
+  const rowsOut = [];
+  for (const row of cells) {
+    if (row.length && row.every(c => /^:?-+:?$/.test(c))) continue; // separator row
+    rowsOut.push(row);
+  }
+  return rowsOut;
+}
+
+function parseTableColWidths(md) {
+  const m = md.trim().split("\n").find(r => /^\s*\|[\s:|-]+\|\s*$/.test(r));
+  return m ? m.replace(/^\|/, "").replace(/\|$/, "").split("|").length : 0;
+}
+
+function renderEditor(el, md) {
+  const grid = parseTable(md);
+  const ncols = grid.length ? Math.max(...grid.map(r => r.length)) : 0;
+  const table = document.createElement("table");
+  table.className = "grid";
+  for (const row of grid) {
+    const tr = document.createElement("tr");
+    for (let c = 0; c < ncols; c++) {
+      const td = document.createElement("td");
+      const input = document.createElement("input");
+      input.value = row[c] !== undefined ? unescapePipe(row[c]) : "";
+      td.appendChild(input);
+      tr.appendChild(td);
+    }
+    table.appendChild(tr);
+  }
+  el.appendChild(table);
+}
+
+function tableToMarkdown(el) {
+  const rows = [...el.querySelectorAll("table.grid tr")]
+    .map(tr => [...tr.querySelectorAll("input")].map(i => escapePipe(i.value.trim())));
+  if (!rows.length) return "";
+  const ncols = Math.max(...rows.map(r => r.length));
+  const pad = r => {
+    while (r.length < ncols) r.push("");
+    return r;
+  };
+  const all = rows.map(pad);
+  const header = all[0], body = all.slice(1);
+  const fmt = r => "| " + r.join(" | ") + " |";
+  return [fmt(header), fmt(header.map(() => "---")), ...body.map(fmt)].join("\n");
+}
+
+/* ---------- item rendering ---------- */
+function badgeClass(it) {
+  if (it.type === "equation") return "badge equation";
+  if (it.type === "table") return "badge table";
+  return it.has_inline_math ? "badge math" : "badge";
+}
+
+function label(it) {
+  if (it.type === "equation") return "equation";
+  if (it.type === "table") return "table";
+  return it.has_inline_math ? "text · inline math" : "text";
+}
+
+function itemEditorOpen(el) {
+  return el.querySelector(".editor") !== null;
+}
+
+function itemContent(el) {
+  const ed = el.querySelector(".editor");
+  if (ed) {
+    if (ed.dataset.kind === "table") return tableToMarkdown(el);
+    return ed.querySelector("textarea").value;
+  }
+  return el.dataset.content;
+}
+
+function renderItem(it) {
+  const el = document.createElement("div");
+  el.className = "item" + (it.status === "verified" || it.status === "rejected" ? " done" : "");
+  el.dataset.id = it.id;
+  el.dataset.type = it.type;
+  el.dataset.content = it.content;
+
+  const head = document.createElement("div");
+  const badge = document.createElement("span");
+  badge.className = badgeClass(it);
+  badge.textContent = label(it);
+  const meta = document.createElement("span");
+  meta.className = "muted";
+  meta.textContent = ` page ${it.page} · ${it.id}` + (it.status !== "pending" ? ` · ${it.status}` : "");
+  head.appendChild(badge);
+  head.appendChild(meta);
+  el.appendChild(head);
+
+  if (it.type === "equation") {
+    const box = document.createElement("div");
+    box.className = "mathbox";
+    box.textContent = `\\[${it.content}\\]`;
+    el.appendChild(box);
+    if (window.MathJax) MathJax.typesetPromise([box]);
+  } else if (it.type === "table") {
+    renderEditor(el, it.content);
+  } else {
+    const pre = document.createElement("pre");
+    pre.className = "content";
+    pre.textContent = it.content;
+    el.appendChild(pre);
+  }
+
+  const actions = document.createElement("div");
+  actions.className = "actions";
+  actions.innerHTML = `
+    <input type="checkbox" class="pick" title="select for bulk">
+    <button class="act accept">Accept</button>
+    <button class="act edit">Edit + Accept</button>
+    <button class="act reject">Reject</button>
+    <button class="act skip">Skip</button>`;
+  el.appendChild(actions);
+  return el;
+}
+
+function openEditor(el) {
+  const kind = el.dataset.type;
+  const ed = document.createElement("div");
+  ed.className = "editor";
+  ed.dataset.kind = kind;
+  if (kind === "table") {
+    // re-render grid with a "done" bar handled by Save via Edit+Accept
+    renderEditor(ed, el.dataset.content);
+  } else if (kind === "equation") {
+    const ta = document.createElement("textarea");
+    ta.rows = 3;
+    ta.style.width = "100%";
+    ta.value = el.dataset.content;
+    ed.appendChild(ta);
+  } else {
+    const ta = document.createElement("textarea");
+    ta.rows = 4;
+    ta.style.width = "100%";
+    ta.value = el.dataset.content;
+    ed.appendChild(ta);
+  }
+  el.insertBefore(ed, el.querySelector(".actions"));
+}
+
+function closeEditor(el) {
+  const ed = el.querySelector(".editor");
+  if (ed) ed.remove();
+}
+
+/* ---------- render page ---------- */
+function updateCounter() {
+  const pages = DOC.pages || [];
+  const pg = pages.find(p => p.page === pageNo);
+  if (!pg) { document.getElementById("counter").textContent = ""; return; }
+  const idx = pg.items.findIndex(i => i.id === cursorId);
+  const x = idx >= 0 ? idx + 1 : 0;
+  document.getElementById("counter").textContent =
+    `${pg.items.length ? `Item ${x || "—"}/${pg.items.length}` : "no items"} on page ${pageNo}`;
+}
+
+function render() {
+  const pages = DOC.pages || [];
+  const sel = document.getElementById("pageSel");
+  sel.innerHTML = "";
+  for (let n = 1; n <= DOC.n_pages; n++) {
+    const opt = document.createElement("option");
+    opt.value = n; opt.textContent = n;
+    if (n === pageNo) opt.selected = true;
+    sel.appendChild(opt);
+  }
+  document.getElementById("pageTotal").textContent = DOC.n_pages;
+  document.getElementById("pageImg").src = `/page/${DOC.doc_id}/${pageNo}.png`;
+  document.getElementById("pgInfo").textContent =
+    `page ${pageNo} of ${DOC.n_pages} (rendered at 200 dpi)`;
+
+  const showMath = document.getElementById("showMath").checked;
+  const showText = document.getElementById("showText").checked;
+  const pg = pages.find(p => p.page === pageNo);
+  const box = document.getElementById("items");
+  box.innerHTML = "";
+  if (!pg || !pg.items.length) {
+    box.innerHTML = '<div class="muted">No items on this page.</div>';
+    return;
+  }
+  for (const it of pg.items) {
+    const show = it.type === "equation" || it.type === "table"
+      || (it.has_inline_math && showMath) || (!it.has_inline_math && showText);
+    if (!show) continue;
+    const el = renderItem(it);
+    if (it.id === cursorId) el.classList.add("active");
+    box.appendChild(el);
+  }
+  updateCounter();
+}
+
+/* ---------- actions ---------- */
+function findFlatIdx(itemId) {
+  return flatItems().findIndex(i => i.id === itemId);
+}
+
+function nextTarget(flatIdx) {
+  const items = flatItems();
+  const cur = items[flatIdx];
+  // same type on same page, else first item of the next page (it's a different
+  // type or page), else nothing
+  for (let i = flatIdx + 1; i < items.length; i++) {
+    if (items[i].type === cur.type && items[i].page === cur.page) return items[i].id;
+  }
+  for (let i = flatIdx + 1; i < items.length; i++) {
+    if (items[i].page > cur.page) return items[i].id;
+  }
+  return null;
+}
+
+async function act(itemId, action, content) {
+  try {
+    const out = await post(`/item/${DOC.doc_id}/${itemId}/action`,
+      content !== undefined ? {action, content} : {action});
+    Object.assign(DOC, out.doc);
+    const flatIdx = findFlatIdx(itemId);
+    const target = nextTarget(flatIdx === -1 ? flatIdx : findFlatIdx(itemId));
+    cursorId = target;
+    render();
+    if (!target) document.getElementById("counter").textContent = "All caught up – nothing left to review.";
+  } catch (e) {
+    alert("Action failed: " + e.message);
+  }
+}
+
+/* ---------- doc-page only: item actions, page nav, bbox, discard ---------- */
+if (DOC) {
+document.getElementById("items").addEventListener("click", async e => {
+  const btn = e.target.closest("button.act");
+  if (!btn) return;
+  const el = e.target.closest(".item");
+  const itemId = el.dataset.id;
+  const cls = btn.className;
+  if (cls.includes("edit")) {
+    if (itemEditorOpen(el)) {
+      await act(itemId, "accept", itemContent(el)); // Edit+Accept: save edited content
+    } else {
+      openEditor(el);
+    }
+    return;
+  }
+  if (cls.includes("accept")) {
+    await act(itemId, "accept", itemEditorOpen(el) ? itemContent(el) : undefined);
+  } else if (cls.includes("reject")) {
+    await act(itemId, "reject");
+  } else if (cls.includes("skip")) {
+    await act(itemId, "skip");
+  }
+});
+
+document.getElementById("bulkSkip").addEventListener("click", () => bulk("skip"));
+document.getElementById("bulkAccept").addEventListener("click", () => bulk("accept"));
+
+async function bulk(action) {
+  const ids = [...document.querySelectorAll("#items .pick:checked")]
+    .map(c => c.closest(".item").dataset.id);
+  if (!ids.length) { alert("select items first"); return; }
+  try {
+    const out = await post("/bulk", {doc_id: DOC.doc_id, action, item_ids: ids});
+    Object.assign(DOC, out.doc);
+    render();
+  } catch (e) { alert("Bulk failed: " + e.message); }
+}
+
+document.getElementById("showMath").addEventListener("change", render);
+document.getElementById("showText").addEventListener("change", render);
+document.getElementById("pageSel").addEventListener("change", e => {
+  pageNo = +e.target.value;
+  cursorId = null;
+  render();
+});
+document.getElementById("prevPg").addEventListener("click", () => {
+  pageNo = Math.max(1, pageNo - 1); cursorId = null; render();
+});
+document.getElementById("nextPg").addEventListener("click", () => {
+  pageNo = Math.min(DOC.n_pages, pageNo + 1); cursorId = null; render();
+});
+
+/* ---------- bounding-box OCR ---------- */
+let bboxMode = false;
+let bboxStart = null;
+
+function imgFrac(e) {
+  const r = document.getElementById("pageImg").getBoundingClientRect();
+  return {
+    x: (e.clientX - r.left) / r.width,
+    y: (e.clientY - r.top) / r.height,
+  };
+}
+
+function bboxRect(e) {
+  const p = imgFrac(e);
+  const x = Math.min(bboxStart.x, p.x), y = Math.min(bboxStart.y, p.y);
+  return {x, y, w: Math.abs(p.x - bboxStart.x), h: Math.abs(p.y - bboxStart.y)};
+}
+
+const bboxBtn = document.getElementById("bboxBtn");
+const bboxSel = document.getElementById("bboxSel");
+
+bboxBtn.addEventListener("click", () => {
+  bboxMode = !bboxMode;
+  bboxBtn.textContent = bboxMode ? "Drawing…" : "Draw box";
+  bboxSel.style.display = "none";
+});
+
+document.getElementById("pageImg").addEventListener("mousedown", e => {
+  if (!bboxMode) return;
+  e.preventDefault();
+  bboxStart = imgFrac(e);
+});
+
+window.addEventListener("mousemove", e => {
+  if (!bboxMode || !bboxStart) return;
+  const r = bboxRect(e);
+  bboxSel.style.display = "block";
+  bboxSel.style.left = (r.x * 100) + "%";
+  bboxSel.style.top = (r.y * 100) + "%";
+  bboxSel.style.width = (r.w * 100) + "%";
+  bboxSel.style.height = (r.h * 100) + "%";
+});
+
+window.addEventListener("mouseup", async e => {
+  if (!bboxMode || !bboxStart) return;
+  const r = bboxRect(e);
+  bboxStart = null;
+  bboxMode = false;
+  bboxBtn.textContent = "Draw box";
+  bboxSel.style.display = "none";
+  if (r.w < 0.01 || r.h < 0.01) return;
+  const bar = document.getElementById("ocrbar");
+  bar.style.display = "block";
+  bar.className = "";
+  bar.textContent = "OCR of region in progress…";
+  try {
+    const out = await post(`/bbox_ocr/${DOC.doc_id}`, {page: pageNo, ...r});
+    Object.assign(DOC, out.doc);
+    bar.textContent = `added ${out.added} item(s) from region`;
+    setTimeout(() => bar.style.display = "none", 2500);
+    render();
+  } catch (e) {
+    bar.className = "err";
+    bar.textContent = "bbox OCR failed: " + e.message;
+  }
+});
+
+/* ---------- discard document ---------- */
+document.getElementById("discardBtn").addEventListener("click", async () => {
+  if (!confirm(`Discard document ${DOC.doc_id}? Its pending record, uploads and verified/rejected items will be deleted.`)) return;
+  try {
+    await post(`/doc/${DOC.doc_id}/discard`, {});
+    location.assign("/");
+  } catch (e) { alert("Discard failed: " + e.message); }
+});
+}
+
+/* ---------- OCR (upload without markdown) ---------- */
+function safeDocUrl(docId) {
+  if (!/^[A-Za-z0-9._-]+$/.test(docId)) return "/";
+  return `/doc/${docId}`;
+}
+
+async function pollJob(jobId, done) {
+  const st = await (await fetch(`/jobs/${jobId}`)).json();
+  if (st.status === "done") done();
+  else if (st.status === "error") throw new Error(st.error || "OCR job failed");
+  else setTimeout(() => pollJob(jobId, done), 2000);
+}
+
+/* ---------- discard scanned documents from the list ---------- */
+document.addEventListener("click", async e => {
+  const btn = e.target.closest("button.discardList");
+  if (!btn) return;
+  const did = btn.dataset.id;
+  if (!confirm(`Discard scanned document ${did}? Pending record, uploads, verified/rejected items will be deleted.`)) return;
+  btn.disabled = true;
+  try {
+    await post(`/doc/${did}/discard`, {});
+    location.reload();
+  } catch (err) {
+    alert("Discard failed: " + err.message);
+    btn.disabled = false;
+  }
+});
+
+(async function initUpload() {
+  const upForm = document.getElementById("upForm");
+  if (!upForm) return;
+  upForm.addEventListener("submit", async e => {
+    e.preventDefault();
+    const st = document.getElementById("upStatus");
+    st.textContent = "uploading…";
+    try {
+      const fd = new FormData(upForm);
+      const res = await fetch("/upload", {method: "POST", body: fd});
+      if (!res.ok) throw new Error((await res.text()).slice(0, 200));
+      const {doc_id, ocr_needed} = await res.json();
+      if (!ocr_needed) { location.assign(safeDocUrl(doc_id)); return; }
+      st.textContent = "OCR running…";
+      const {job_id} = await post(`/ocr/${doc_id}`);
+      await pollJob(job_id, () => { location.assign(safeDocUrl(doc_id)); });
+    } catch (err) {
+      st.textContent = "upload failed: " + err.message;
+    }
+  });
+})();
+</script>
+</body>
+</html>

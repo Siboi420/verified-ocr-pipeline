@@ -1,0 +1,191 @@
+"""End-to-end smoke test for the validation app (test client, no live OCR).
+
+Covers PLAN verification cases 2-4 minus the actual GLM-OCR call:
+  - load by paths -> items parsed, page PNG renders
+  - accept (edited table) -> validation/verified/<item_id>.json
+  - reject equation -> validation/rejected/
+  - skip -> stays pending, status=skipped
+  - upload without .md -> ocr_needed=true; /ocr returns job_id immediately;
+    with UNSLOTH_API_KEY unset the job errors with a clear message
+Run: python3 smoke_test.py
+"""
+import io
+import json
+import os
+import re
+import sys
+from pathlib import Path
+
+import pymupdf
+
+REPO = Path(__file__).resolve().parent
+
+MARKDOWN = """# Smoke
+--- Page 1 ---
+The frame carries a moment:
+$$
+M_u = 1.2 M_d + 1.6 M_l
+$$
+
+| Member | Capacity (kN) |
+|--------|---------------|
+| B1     | 245.3         |
+| B2     | 189.7         |
+
+Trailing prose with \\(\\phi = 0.9\\) inline.
+
+--- Page 2 ---
+$$
+V_s = \\frac{A_v f_y d}{s}
+$$
+"""
+EDITED_TABLE = "| Member | Capacity (kN) |\n|---|---|\n|B1|999.9|\n|B2|188.8|"
+
+
+def check(cond, msg):
+    status = "ok" if cond else "FAIL"
+    print(f"  [{status}] {msg}")
+    if not cond:
+        sys.exit(1)
+
+
+def read_json(path):
+    """Read a JSON file, crashing the test loudly if it is missing/corrupt."""
+    try:
+        return json.loads(Path(path).read_text())
+    except (json.JSONDecodeError, OSError) as e:
+        raise AssertionError(f"cannot read {path}: {e}") from e
+
+
+def main():
+    # Fixture PDF (2 pages) so page_count and page PNG work.
+    pdf_dir = REPO / "validation" / "uploads" / "smoke"
+    pdf_dir.mkdir(parents=True, exist_ok=True)
+    pdf_path = pdf_dir / "smoke.pdf"
+    md_path = pdf_dir / "smoke.md"
+    if not pdf_path.exists():
+        doc = pymupdf.open()
+        for _ in range(2):
+            doc.new_page()
+        doc.save(str(pdf_path))
+        doc.close()
+    md_path.write_text(MARKDOWN)
+
+    os.environ.pop("UNSLOTH_API_KEY", None)  # force the no-key path deterministically
+
+    import app as appmod  # pyright: ignore[reportMissingImports] — same-dir module
+
+    client = appmod.app.test_client()
+
+    # /load
+    r = client.post("/load", data={"pdf_path": str(pdf_path), "md_path": str(md_path)})
+    check(r.status_code == 302, "/load 302 redirect")
+    doc_id = "smoke"
+    pending = read_json(REPO / "validation" / "pending" / "smoke.json")
+    pages = pending["pages"]
+    check(len(pages) == 2, "2 pages parsed")
+    check([p["page"] for p in pages] == [1, 2], "page numbers 1,2")
+    p1 = pages[0]["items"]
+    check([i["type"] for i in p1] == ["equation", "table", "text", "text", "text"],
+          "page 1 order: equation, table, text(with math), text, text (title merged)")
+    check(p1[2]["has_inline_math"], "inline math flagged on trailing prose")
+    check(pending["n_pages"] == 2, "n_pages from PyMuPDF = 2")
+
+    # /doc/<id>
+    r = client.get(f"/doc/{doc_id}")
+    check(r.status_code == 200 and 'id="main"' in r.get_data(as_text=True),
+          "/doc/smoke renders review page")
+
+    # page PNG
+    r = client.get(f"/page/{doc_id}/1.png")
+    check(r.status_code == 200 and r.mimetype == "image/png" and len(r.data) > 1000,
+          "page PNG served")
+
+    # accept edited table -> verified/
+    table_id = p1[1]["id"]
+    r = client.post(f"/item/{doc_id}/{table_id}/action",
+                    json={"action": "accept", "content": EDITED_TABLE})
+    check(r.status_code == 200, "accept edited table 200")
+    verified = read_json(REPO / "validation" / "verified" / f"{table_id}.json")
+    check(verified["content"] == EDITED_TABLE, "verified JSON holds edited markdown")
+    check(verified["type"] == "table" and verified["page"] == 1, "verified metadata correct")
+    pending = read_json(REPO / "validation" / "pending" / "smoke.json")
+    check(next(i for i in pending["pages"][0]["items"] if i["id"] == table_id)["status"] == "verified",
+          "pending doc marks item verified")
+
+    # reject equation -> rejected/
+    eq_id = p1[0]["id"]
+    r = client.post(f"/item/{doc_id}/{eq_id}/action", json={"action": "reject"})
+    check(r.status_code == 200 and (REPO / "validation" / "rejected" / f"{eq_id}.json").exists(),
+          "reject equation -> rejected/")
+
+    # skip -> stays pending, status=skipped
+    text_id = p1[2]["id"]
+    r = client.post(f"/item/{doc_id}/{text_id}/action", json={"action": "skip"})
+    pending = read_json(REPO / "validation" / "pending" / "smoke.json")
+    it = next(i for i in pending["pages"][0]["items"] if i["id"] == text_id)
+    check(r.status_code == 200 and it["status"] == "skipped", "skip keeps item pending/skipped")
+
+    # bulk pass-for-now over remaining pending items on the doc
+    r = client.post("/bulk", json={"doc_id": doc_id, "action": "skip",
+                                   "item_ids": [i["id"] for pg in pending["pages"] for i in pg["items"]]})
+    check(r.status_code == 200 and r.get_json()["updated"] == 3, "bulk skip updates 3 (i4, i5, page2 equation)")
+
+    # bbox crop: pure append helper adds a table with a unique bbox id
+    probe = {"doc_id": doc_id, "pages": []}
+    n = appmod.append_bbox_items(probe, 1, "|A|B|\n|---|---|\n|1|2|")
+    check(n == 1 and probe["pages"][0]["page"] == 1
+          and probe["pages"][0]["items"][0]["type"] == "table"
+          and "bbox" in probe["pages"][0]["items"][0]["id"],
+          "append_bbox_items adds table with bbox id")
+
+    # bbox route input validation (no live OCR call)
+    r = client.post(f"/bbox_ocr/{doc_id}", json={"page": 1})
+    check(r.status_code == 400, "bbox OCR rejects missing coords")
+    r = client.post(f"/bbox_ocr/{doc_id}", json={"page": 99, "x": 0, "y": 0, "w": .5, "h": .5})
+    check(r.status_code == 404, "bbox OCR rejects out-of-range page")
+
+    # upload without .md -> async OCR job; key unset -> clear error
+    try:
+        pdf_bytes = open(pdf_path, "rb").read()
+    except OSError as e:
+        raise AssertionError(f"cannot read {pdf_path}: {e}") from e
+    # native form submit (Accept: text/html) -> redirect to /doc/<id>?ocr=1
+    r = client.post("/upload", data={"pdf": (io.BytesIO(pdf_bytes), "smoke.pdf")},
+                    headers={"Accept": "text/html"})
+    check(r.status_code == 302 and r.headers.get("Location", "").endswith("?ocr=1"),
+          "html upload without md -> 302 /doc/smoke?ocr=1")
+    # AJAX upload -> JSON ocr_needed (existing behavior)
+    r = client.post("/upload", data={"pdf": (io.BytesIO(pdf_bytes), "smoke.pdf")})
+    check(r.status_code == 200, "upload 200")
+    up = r.get_json()
+    check(up["doc_id"] == "smoke" and up["ocr_needed"], "upload without md -> ocr_needed")
+    r = client.post(f"/ocr/{up['doc_id']}")
+    check(r.status_code == 200, "/ocr returns immediately")
+    job_id = r.get_json()["job_id"]
+    import time
+    st = {"status": "running"}
+    for _ in range(50):
+        st = client.get(f"/jobs/{job_id}").get_json()
+        if st["status"] != "running":
+            break
+        time.sleep(0.1)
+    check(st["status"] == "error" and "UNSLOTH_API_KEY" in st.get("error", ""),
+          f"no-key OCR job fails clearly: {st.get('error', '')[:60]}")
+
+    # GET / still lists the loaded doc
+    r = client.get("/")
+    check(r.status_code == 200 and "smoke" in r.get_data(as_text=True), "/ lists documents")
+
+    # discard document: pending record + verified/rejected item copies removed
+    r = client.post(f"/doc/{doc_id}/discard")
+    check(r.status_code == 200 and not (REPO / "validation" / "pending" / f"{doc_id}.json").exists(),
+          "discard removes pending record")
+    check(not any((REPO / "validation" / "verified").glob(f"{doc_id}-*.json")),
+          "discard cleans verified items")
+
+    print("\nsmoke: all checks passed")
+
+
+if __name__ == "__main__":
+    main()

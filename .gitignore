@@ -1,0 +1,17 @@
+# bytecode / caches
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# runtime data (scanned documents, review state, uploads)
+validation/pending/
+validation/verified/
+validation/rejected/
+validation/uploads/
+
+# env / secrets (no hardcoded keys)
+*.env
+.env*
+
+# logs
+*.log
