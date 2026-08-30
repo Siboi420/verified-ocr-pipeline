@@ -539,15 +539,18 @@ def bulk():
         abort(404)
         return
     action = data.get("action", "skip")
-    if action not in ("skip", "accept"):
-        abort(400, "bulk action must be skip|accept")
+    if action not in ("skip", "accept", "reject"):
+        abort(400, "bulk action must be skip|accept|reject")
     targets = set(data.get("item_ids", []))
     updated = 0
     for page in doc.get("pages", []):
         for item in page["items"]:
-            if item["id"] not in targets or item["status"] in ("verified", "rejected"):
-                continue  # finalized items are never bulk-mutated
-            if item["status"] == ("skipped" if action == "skip" else "verified"):
+            if item["id"] not in targets:
+                continue  # not targeted
+            if action == "skip" and item["status"] in ("verified", "rejected"):
+                continue  # skip never touches finalized items
+            target = {"accept": "verified", "reject": "rejected"}.get(action, "skipped")
+            if item["status"] == target:
                 continue  # already in the target state: nothing changes
             apply_action(doc, item["id"], action)
             updated += 1

@@ -195,6 +195,17 @@ def main():
     check(tv.get("section") == "5.3" and tv.get("source_name") == "smoke.pdf",
           "text export carries section/source_name")
 
+    # bulk reject flips an accepted item (finalized items are bulk-mutable for accept/reject)
+    r = client.post("/bulk", json={"doc_id": doc_id, "action": "reject",
+                                   "item_ids": [table_id]})
+    check(r.status_code == 200 and r.get_json()["updated"] == 1, "bulk reject flips accepted item")
+    pending = read_json(REPO / "validation" / "pending" / "smoke.json")
+    check(next(i for i in pending["pages"][0]["items"] if i["id"] == table_id)["status"] == "rejected",
+          "bulk reject updates status")
+    check(not (REPO / "validation" / "verified" / f"{table_id}.json").exists()
+          and (REPO / "validation" / "rejected" / f"{table_id}.json").exists(),
+          "bulk reject moves copies")
+
     # bulk pass-for-now over remaining pending items on the doc
     r = client.post("/bulk", json={"doc_id": doc_id, "action": "skip",
                                    "item_ids": [i["id"] for pg in pending["pages"] for i in pg["items"]]})

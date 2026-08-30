@@ -80,6 +80,8 @@ window.MathJax = {tex: {inlineMath: [["\\(", "\\)"], ["$", "$"]]}};
   <button id="bulkAccept">Accept selected</button>
   <button id="bulkAcceptMath" title="accept all inline-math text items on this page">Accept inline math</button>
   <button id="bulkAcceptText" title="accept all plain text items on this page">Accept text</button>
+  <button id="bulkRejectMath" title="reject all inline-math text items on this page">Reject inline math</button>
+  <button id="bulkRejectText" title="reject all plain text items on this page">Reject text</button>
   <button id="discardBtn" title="delete this document from the queue">Discard document</button>
   <a href="/"><button>‹ documents</button></a>
 </div>
@@ -533,19 +535,22 @@ document.getElementById("onlyOcr").addEventListener("change", () => {
   render();
 });
 
-document.getElementById("bulkAcceptMath").addEventListener("click", () => bulkAcceptType("math"));
-document.getElementById("bulkAcceptText").addEventListener("click", () => bulkAcceptType("text"));
+document.getElementById("bulkAcceptMath").addEventListener("click", () => bulkByType("accept", "math"));
+document.getElementById("bulkAcceptText").addEventListener("click", () => bulkByType("accept", "text"));
+document.getElementById("bulkRejectMath").addEventListener("click", () => bulkByType("reject", "math"));
+document.getElementById("bulkRejectText").addEventListener("click", () => bulkByType("reject", "text"));
 
-async function bulkAcceptType(kind) {
+async function bulkByType(action, kind) {
+  const final = action === "accept" ? "verified" : "rejected";
   const pg = (DOC.pages || []).find(p => p.page === pageNo);
   const ids = pg ? pg.items
     .filter(it => it.type === "text"
       && (kind === "math" ? it.has_inline_math : !it.has_inline_math)
-      && it.status !== "verified" && it.status !== "rejected")
+      && it.status !== final)
     .map(it => it.id) : [];
-  if (!ids.length) { alert("nothing to accept on this page"); return; }
+  if (!ids.length) { alert(`nothing to ${action} on this page`); return; }
   try {
-    const out = await post("/bulk", {doc_id: DOC.doc_id, action: "accept", item_ids: ids});
+    const out = await post("/bulk", {doc_id: DOC.doc_id, action, item_ids: ids});
     Object.assign(DOC, out.doc);
     render();
   } catch (e) { alert("Bulk failed: " + e.message); }

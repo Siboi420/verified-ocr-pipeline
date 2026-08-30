@@ -89,7 +89,9 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   `apply_action` (used by `/item/<id>/action`) treats `verified`/`rejected` items as
   final except for an explicit **flip to the other state** (accept↔reject; same-state
   and skip stay no-ops), and removes the stale counterpart JSON
-  (`verified/`↔`rejected/`) when flipping so the copies never diverge.
+  (`verified/`↔`rejected/`) when flipping so the copies never diverge. `/bulk` accepts
+  `skip|accept|reject` with the same semantics: skip never touches finalized items,
+  accept/reject flip them; already-in-target-state items are no-ops.
 - `rag_uploader.py` — reads `validation/verified/*.json`, groups items by
   `doc_id`, renders one markdown file per source doc (`source_name` header, per-item
   `## page N <type> — <section>` titles, section is the full dotted heading)
@@ -134,11 +136,14 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   same list, defaulting to first/last when off it). When the filter is on, the page
   selector and `#pageTotal` show the *position within the OCR'd pages* (`pageLabel()`,
   e.g. "2 of 3") instead of the absolute page number; `#pgInfo` keeps the actual page
-  for reference. Two per-page bulk buttons reuse
-  the existing `/bulk` accept route with computed `item_ids`: `bulkAcceptMath`/
-  `bulkAcceptText` (→ `bulkAcceptType(kind)`) accept every current-page text item
-  with/without `has_inline_math` that isn't verified/rejected (works regardless of
-  the showMath/showText toggles; alerts "nothing to accept on this page" when empty).
+  for reference. Four per-page bulk buttons reuse
+  the existing `/bulk` route with computed `item_ids`: `bulkAcceptMath`/`bulkAcceptText`
+  and `bulkRejectMath`/`bulkRejectText` (→ `bulkByType(action, kind)`) accept/reject
+  every current-page text item
+  with/without `has_inline_math` and flip finalized items like single-item actions (accept
+  converts rejected→verified, reject converts verified→rejected; same-state items
+  skipped; works regardless of the showMath/showText toggles; alerts
+  "nothing to accept/reject on this page" when empty).
   **Note:** `location.reload()` refreshes DOC after OCR job completes (deliberate;
   the old inline `const DOC = ([^;]+);` regex broke on `;` in content).
   Accepted/rejected items are visually distinct: `.item.done` dims, `.item.verified`
@@ -151,9 +156,9 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
 - Timeouts in `ocr_engine.py` are 600s.
 - Itemizer handles **HTML tables** (GLM-OCR sometimes emits HTML instead of markdown).
 - Auto-OCR on PDF-only upload works (blue bar, polls, reloads, `?ocr=1`).
-- "OCR'd pages only" filter + per-page bulk accept (inline math / text) work via
-  the existing `/bulk` route — no backend changes (bulk still never mutates
-  finalized items; single-item accept/reject CAN flip verified↔rejected).
+- "OCR'd pages only" filter + per-page bulk accept/reject (inline math / text) work via
+  the existing `/bulk` route — bulk accept/reject now flip finalized items exactly like
+  single-item actions (skip still never touches them).
 - Upload accepts an optional `ocr_pages` range — single (`5`, `1-3`) or
   comma-separated (`2-3, 4-9`); stored on the pending doc JSON as a list of
   `[start, end]` pairs and honored by the initial OCR run only (re-OCR of extra
@@ -184,7 +189,7 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
 ## Tests / verification
 
 - `python3 test_itemizer.py` — 61 itemizer assertions.
-- `python3 smoke_test.py` — 81 end-to-end checks via Flask test client (no live OCR;
+- `python3 smoke_test.py` — 84 end-to-end checks via Flask test client (no live OCR;
   asserts `?ocr=1` redirect, no-key OCR error, `parse_page_range`/`parse_page_ranges`
   valid+invalid forms, `ocr_pages` storage incl. multiple ranges, invalid -> 400,
   md-wins-over-range, NaN bbox coords rejected).
