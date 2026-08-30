@@ -23,6 +23,11 @@ INLINE_MATH_RE = re.compile(r"\\\(.+?\\\)|\$[^$\n]+\$")
 # A caption line: "Table 21.2.1—..." (em dash/dash/space after the number).
 TABLE_CAPTION_RE = re.compile(r"^\s*Table\s+(\d+(?:\.\d+)*)\b(.*)$", re.IGNORECASE)
 
+# Equation reference markers: leading "(a)" and trailing "(22.5.1.10a)".
+# GLM-OCR emits them OUTSIDE the $...$ span: "(a) $$x$$ (22.5.1.10a)".
+EQ_LETTER_HEAD_RE = re.compile(r"^\s*\(([a-z])\)")          # "(a) ..."
+EQ_NUM_TAIL_RE = re.compile(r"\((\d+(?:\.\d+)*(?:[a-z])?)\)\s*$")  # "... (22.5.1.10a)"
+
 # Chapter heading: "CHAPTER 21—..." / "Chapter 11" (word prefix, any digit count).
 CHAPTER_RE = re.compile(r"^\s*CHAPTER\s+(\d+)\b", re.IGNORECASE)
 # Section heading: "21.2", "21.2.1.1.1", "R21.2.1" — 2-5 dotted components.
@@ -254,6 +259,19 @@ def _scan_gap(text, base_line):
     return events
 
 
+def eq_refs(front, back):
+    """(letters, num) of an equation from its line text.
+
+    front = text before/inside the span start; back = span content + trailing
+    text. Returns (None, None) when neither marker is present.
+    """
+    m = EQ_LETTER_HEAD_RE.search(front)
+    letters = m.group(1) if m else None
+    m = EQ_NUM_TAIL_RE.search(back)
+    num = m.group(1) if m else None
+    return letters, num
+
+
 def _parse_page_body(body):
     """Scan one page's body in document order; return items with chapter/section.
 
@@ -284,8 +302,14 @@ def _parse_page_body(body):
     for s0, e0, kind, m in accepted:
         events.extend(_scan_gap(body[pos:s0], body.count("\n", 0, pos) + 1))
         if kind == "equation":
+            content = (m.group(1) or m.group(2) or "").strip()
+            ls = body.rfind("\n", 0, s0) + 1
+            le = body.find("\n", e0)
+            if le == -1:
+                le = len(body)
+            letters, num = eq_refs(body[ls:s0] + content, content + body[e0:le])
             events.append({"line": body.count("\n", 0, s0) + 1, "kind": "equation",
-                           "content": (m.group(1) or m.group(2) or "").strip()})
+                           "content": content, "eq_letters": letters, "eq_num": num})
         else:
             events.append({"line": body.count("\n", 0, s0) + 1, "kind": "html",
                            "content": m.group(0).strip()})
@@ -307,6 +331,10 @@ def _parse_page_body(body):
                     "has_inline_math": bool(INLINE_MATH_RE.search(ev["content"]))}
         elif ev["kind"] == "equation":
             item = {"type": "equation", "content": ev["content"], "has_inline_math": False}
+            if ev.get("eq_letters") is not None:
+                item["eq_letters"] = ev["eq_letters"]
+            if ev.get("eq_num") is not None:
+                item["eq_num"] = ev["eq_num"]
         elif ev["kind"] == "html":
             md = _html_to_markdown(ev["content"])
             item = {"type": "table" if md else "text", "content": md if md else ev["content"],

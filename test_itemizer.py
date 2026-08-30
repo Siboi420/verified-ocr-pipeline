@@ -265,6 +265,38 @@ The value is in accordance with 21.2.1.
     check(any(it["type"] == "text" and it["content"] == "Text after." for it in up),
           "text after the unclosed table is not eaten")
 
+    check(itemizer.eq_refs("", "\\hspace{1cm} (22.2.2.4.1)")[1] == "22.2.2.4.1",
+          "eq_refs: number after \\hspace{}, as in the real doc")
+
+    # Equation reference markers: GLM puts "(a)" and the number OUTSIDE the
+    # $$...$$ span: "(a) $$x$$ (22.5.1.10a)".
+    md_eq = """--- Page 1 ---
+
+(a) $$
+\\frac{V_{u,x}}{\\phi V_{n,x}} \\leq 0.5
+$$ (22.5.1.10a)
+
+(b) $$
+\\frac{V_{u,y}}{\\phi V_{n,y}} \\leq 0.5
+$$ (22.5.1.10b)
+
+$$
+V_n = V_c + V_s
+$$
+"""
+    eqs = [it for pg in itemizer.parse_document(md_eq, "d") for it in pg["items"]
+           if it["type"] == "equation"]
+    check(len(eqs) == 3, "three equations parsed")
+    eqa = next(it for it in eqs if "V_{u,x}" in it["content"])
+    check(eqa["eq_letters"] == "a" and eqa["eq_num"] == "22.5.1.10a",
+          "eq (a): leading letter + trailing number captured")
+    eqb = next(it for it in eqs if "V_{u,y}" in it["content"])
+    check(eqb["eq_letters"] == "b" and eqb["eq_num"] == "22.5.1.10b",
+          "eq (b): letter+number captured")
+    plain = next(it for it in eqs if "V_n =" in it["content"])
+    check(plain.get("eq_letters") is None and plain.get("eq_num") is None,
+          "equation without markers carries no refs")
+
     print("itemizer: all checks passed")
 
 

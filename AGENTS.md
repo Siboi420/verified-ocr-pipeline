@@ -92,12 +92,18 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   (`verified/`↔`rejected/`) when flipping so the copies never diverge, and carries
   an optional `table_spans` field (merged-cell map for tables) into the item and
   verified/rejected JSON. Accept-with-new-content also updates an already-verified
-  item (used when re-editing a merged table). `/bulk` accepts
+  item (used when re-editing a merged table). For `equation` items, accept/reject
+  payloads also carry `eq_num`/`eq_letters` (the cross-reference key, e.g.
+  "22.5.1.10a" + "a") when present, and accepting with EDITED content re-derives
+  them from the new text via `eq_refs` (itemizer's capture stands until edited,
+  so unedited accepts never clobber it). `/bulk` accepts
   `skip|accept|reject` with the same semantics: skip never touches finalized items,
   accept/reject flip them; already-in-target-state items are no-ops.
 - `rag_uploader.py` — reads `validation/verified/*.json`, groups items by
   `doc_id`, renders one markdown file per source doc (`source_name` header, per-item
-  `## page N <type> — <section>` titles, section is the full dotted heading)
+  `## page N <type> — <section>` titles, section is the full dotted heading;
+  equation items with `eq_num` get a ` · eq(N)` title suffix so the KB text
+  carries the resolvable key)
   and uploads to an Unsloth Studio RAG KB (`/api/rag/knowledge-bases`, name via
   `--kb`, default "Verified OCR"). Server-side chunking + embeddings. Skips
   unreadable JSON **and stale pre-metadata exports** (missing `source_name` — the
@@ -110,17 +116,26 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   `parse_page_range(s)` (`"N"`/`"N-M"` -> tuple or `None`) and `parse_page_ranges(s)`
   (comma-separated `2-3, 4-9` -> list of tuples or `None`; used by the app upload,
   CLI `--pages` uses the single-range form),
-  `ocr_page`/`ocr_batch(workers=2, on_progress=None)` (`on_progress(done, total)`
+  `ocr_page`/`ocr_batch(workers=2, max_tokens_per_page=8192, on_progress=None)`
+  (`on_progress(done, total)`
   fires after each completed page), `assemble_markdown`. Timeouts were raised to
   600s (GLM-OCR f16-on-CPU read timed out at 120s; now GPU so fine). Payload is
-  non-streaming chat completions — see note below.
+  non-streaming chat completions — see note below. `max_tokens_per_page` default
+  was 4096; most pages exceeded it (finish_reason="length" → re-send at 2×),
+  so it's now **8192** (CLI `--max-tokens` default too) — at 16k context this
+  is safe and eliminates most truncation retries.
 - `itemizer.py` — splits markdown on `--- Page N ---`, extracts equations
   (`$$...$$` / `\[...\]`), **pipe tables and HTML `<table>...</table>`** (added to fix
   GLM-OCR answering HTML tables; HTML converted to `|...|` markdown), inline math
   (`\(...\)` / `$...$`). Item order: equation → table → text-math → text, per page.
   Every item carries `chapter`/`section` (nearest preceding `CHAPTER N` / dotted
   heading, `R21.2.1` kept, both reset per page; line-start anchored so inline
-  refs/decimals never match). `clean_export_text()` strips `# OCR:` titles and
+  refs/decimals never match). Equation items additionally may carry
+  `eq_letters`/`eq_num`, the reference markers GLM-OCR prints OUTSIDE the
+  `$$...$$` span ("(a) $$x$$ (22.5.1.10a)"): `eq_refs(front, back)` grabs a
+  leading `(a)` and a trailing `(22.5.1.10a)`-style number (letter suffix
+  included), and the reviewer can fix a missing/OCR-dropped number by editing
+  the equation and accepting. `clean_export_text()` strips `# OCR:` titles and
   standalone CODE/COMMENTARY markers — applied **at export only** (verified JSON,
   not the review UI/doc).
 - `templates/index.html` — single-page JS UI. Has an `autoOcr()` + `?ocr=1` gate
@@ -168,6 +183,7 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   shrink-wraps the image so the overlay tracks zoom, and `#imgWrap` scrolls when zoomed in
   (zoom re-measured on window resize). `imgFrac()` **clamps to [0,1]** so a draw-box drag
   that ends outside the zoomed image never sends out-of-range fractions to the server.
+  Equation items display their markers (`(a) (22.5.1.10a)`) in the item meta line.
 - `validation/` — `pending/` (docs), `verified/`, `rejected/` (per-item JSON), `uploads/<doc_id>/` (pdf, md, page PNGs).
 
 ## Current state (verified facts — don't contradict)
@@ -208,7 +224,7 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
 
 ## Tests / verification
 
-- `python3 test_itemizer.py` — 61 itemizer assertions.
+- `python3 test_itemizer.py` — 66 itemizer assertions.
 - `python3 smoke_test.py` — 89 end-to-end checks via Flask test client (no live OCR;
   asserts `?ocr=1` redirect, no-key OCR error, `parse_page_range`/`parse_page_ranges`
   valid+invalid forms, `ocr_pages` storage incl. multiple ranges, invalid -> 400,

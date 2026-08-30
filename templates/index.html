@@ -444,7 +444,12 @@ function renderItem(it) {
   badge.textContent = label(it);
   const meta = document.createElement("span");
   meta.className = "muted";
-  meta.textContent = ` page ${it.page} · ${it.id}` + (it.status !== "pending" ? ` · ${it.status}` : "");
+  const refs = [];
+  if (it.eq_letters) refs.push(`(${it.eq_letters})`);
+  if (it.eq_num) refs.push(`(${it.eq_num})`);
+  meta.textContent = ` page ${it.page} · ${it.id}`
+    + (refs.length ? ` · ${refs.join(" ")}` : "")
+    + (it.status !== "pending" ? ` · ${it.status}` : "");
   head.appendChild(badge);
   head.appendChild(meta);
   el.appendChild(head);

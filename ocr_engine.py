@@ -250,7 +250,7 @@ def ocr_page(image_path, page_num=None, max_tokens=4096, prompt=OCR_PROMPT):
 
 # ── Batch OCR ────────────────────────────────────────────────────────────────
 
-def ocr_batch(images, workers=2, max_tokens_per_page=4096, on_progress=None):
+def ocr_batch(images, workers=2, max_tokens_per_page=8192, on_progress=None):
     """
     OCR multiple pages concurrently.
     images: list of (page_num, image_path)
@@ -305,8 +305,8 @@ def main():
                         help="Concurrent workers (default: 2)")
     parser.add_argument("--dpi", type=int, default=200,
                         help="PDF render DPI (default: 200)")
-    parser.add_argument("--max-tokens", type=int, default=4096,
-                        help="Max tokens per page (default: 4096, auto-retries if truncated)")
+    parser.add_argument("--max-tokens", type=int, default=8192,
+                        help="Max tokens per page (default: 8192, auto-retries if truncated)")
     parser.add_argument("--output", "-o", help="Output markdown file (default: stdout)")
 
     args = parser.parse_args()

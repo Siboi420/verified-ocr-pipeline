@@ -14,7 +14,7 @@ from pathlib import Path
 from flask import Flask, abort, jsonify, redirect, render_template, request, send_file  # pyright: ignore[reportMissingImports] — env lacks flask; runtime python3 has it
 
 import config
-from itemizer import clean_export_text, parse_document, parse_table_caption, pick_caption_from_band, unwrap_html_caption  # pyright: ignore[reportMissingImports] — same-dir module
+from itemizer import clean_export_text, eq_refs, parse_document, parse_table_caption, pick_caption_from_band, unwrap_html_caption  # pyright: ignore[reportMissingImports] — same-dir module
 from ocr_engine import CAPTION_BAND_PROMPT, assemble_markdown, ocr_batch, ocr_page, parse_page_ranges, pdf_to_images, tesseract_ocr
 
 BASE = Path(__file__).resolve().parent
@@ -126,6 +126,10 @@ def apply_action(doc, item_id, action, content=None, table_spans=None):
                 if table_spans is not None:
                     item["table_spans"] = table_spans
                 final = content if content not in (None, "") else item["content"]
+                if item["type"] == "equation" and content not in (None, ""):
+                    # reviewer edited the equation: re-derive markers from the new
+                    # text (itemizer's capture stands unless the text changed)
+                    item["eq_letters"], item["eq_num"] = eq_refs(final, final)
                 payload = {
                     "doc_id": doc["doc_id"],
                     "item_id": item_id,
@@ -141,6 +145,10 @@ def apply_action(doc, item_id, action, content=None, table_spans=None):
                     payload["table_number"] = item.get("table_number")
                 if item.get("table_spans") is not None:
                     payload["table_spans"] = item["table_spans"]
+                if item["type"] == "equation" and item.get("eq_num") is not None:
+                    payload["eq_num"] = item["eq_num"]
+                    if item.get("eq_letters") is not None:
+                        payload["eq_letters"] = item["eq_letters"]
                 target = VERIFIED_DIR if action == "accept" else REJECTED_DIR
                 (target / f"{item_id}.json").write_text(json.dumps(payload, indent=2))
                 stale = REJECTED_DIR if action == "accept" else VERIFIED_DIR

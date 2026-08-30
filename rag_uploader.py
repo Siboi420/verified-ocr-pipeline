@@ -74,6 +74,9 @@ def render_markdown(items):
         if not content:
             continue
         title = f"## page {it['page']} {it['type']}"
+        # equation number is the resolvable cross-reference key ("eq(22.5.1.10a)")
+        if it.get("type") == "equation" and it.get("eq_num"):
+            title += f" · eq({it['eq_num']})"
         # section is the full dotted heading ("5.3", "4.1.1"); chapter is
         # only a context fallback when no dotted heading was stamped.
         if it.get("section"):
