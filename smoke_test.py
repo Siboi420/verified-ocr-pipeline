@@ -7,6 +7,9 @@ Covers PLAN verification cases 2-4 minus the actual GLM-OCR call:
   - skip -> stays pending, status=skipped
   - upload without .md -> ocr_needed=true; /ocr returns job_id immediately;
     with UNSLOTH_API_KEY unset the job errors with a clear message
+  - equation key editing: explicit eq_num/eq_letters (None = untouched, "" = cleared)
+  - draw-box type forcing (auto/equation/table/text) + append_bbox_item kinds
+  - per-item delete (item + verified/rejected copies removed)
 Run: python3 smoke_test.py
 """
 import io
@@ -194,8 +197,33 @@ def main():
           and verified.get("table_spans") == [],
           "re-accepting a verified table with new content updates it")
 
-    # reject equation -> rejected/
+    # equation key editing: eq_num/eq_letters explicit, never re-derived
     eq_id = p1[0]["id"]
+    eq_content = p1[0]["content"]
+    r = client.post(f"/item/{doc_id}/{eq_id}/action",
+                    json={"action": "accept", "content": eq_content,
+                          "eq_num": "22.5.1.10", "eq_letters": "a"})
+    check(r.status_code == 200, "accept equation with eq key 200")
+    ev = read_json(REPO / "validation" / "verified" / f"{eq_id}.json")
+    check(ev.get("eq_num") == "22.5.1.10" and ev.get("eq_letters") == "a",
+          "verified JSON carries eq_num/eq_letters")
+    # re-accept with content only: the key survives (the bug fix)
+    r = client.post(f"/item/{doc_id}/{eq_id}/action",
+                    json={"action": "accept", "content": eq_content})
+    check(r.status_code == 200, "re-accept equation 200")
+    ev = read_json(REPO / "validation" / "verified" / f"{eq_id}.json")
+    check(ev.get("eq_num") == "22.5.1.10",
+          "re-accept with content only preserves the eq key")
+    # empty eq_num clears the key (item-level; export drops the coupled eq_letters too)
+    r = client.post(f"/item/{doc_id}/{eq_id}/action",
+                    json={"action": "accept", "content": eq_content, "eq_num": ""})
+    ev = read_json(REPO / "validation" / "verified" / f"{eq_id}.json")
+    check(r.status_code == 200 and ev.get("eq_num") is None, "empty eq_num clears the key")
+    pd0 = read_json(REPO / "validation" / "pending" / "smoke.json")
+    pending_eq = next(i for i in pd0["pages"][0]["items"] if i["id"] == eq_id)
+    check("eq_num" not in pending_eq and pending_eq.get("eq_letters") == "a",
+          "item keeps eq_letters when only eq_num is cleared")
+    # reject equation -> rejected/
     r = client.post(f"/item/{doc_id}/{eq_id}/action", json={"action": "reject"})
     check(r.status_code == 200 and (REPO / "validation" / "rejected" / f"{eq_id}.json").exists(),
           "reject equation -> rejected/")
@@ -243,6 +271,36 @@ def main():
           and "bbox" in probe["pages"][0]["items"][0]["id"],
           "append_bbox_items adds table with bbox id")
 
+    # append_bbox_item: forced kinds (equation key capture, text math flag, inheritance)
+    probe2 = {"doc_id": "probe", "pages": [{"page": 1, "items": [
+        {"id": "prev", "type": "text", "content": "x", "chapter": "5", "section": "5.3"}]}]}
+    eitem = appmod.append_bbox_item(probe2, 1, "(a) $$E = m c^2$$ (22.5.1.10a)", "equation")
+    check(eitem["eq_num"] == "22.5.1.10a" and eitem["eq_letters"] == "a",
+          "append_bbox_item equation captures eq_num/eq_letters")
+    check(eitem["chapter"] == "5" and eitem["section"] == "5.3",
+          "append_bbox_item inherits chapter/section from the latest item")
+    titem = appmod.append_bbox_item(probe2, 1, "The factor \\(\\phi = 0.9\\) governs.", "text")
+    tplain = appmod.append_bbox_item(probe2, 1, "Plain prose.", "text")
+    check(titem["has_inline_math"] and not tplain["has_inline_math"],
+          "append_bbox_item text flags inline math")
+    check(appmod.append_bbox_item(probe2, 1, "|A|\n|---|\n|1|", "table")["type"] == "table",
+          "append_bbox_item forced table kind")
+
+    # equation/text kinds strip the HTML <table> wrapper GLM sometimes emits,
+    # keeping the math/content (and a trailing eq key still captures)
+    art = ('<table><thead><tr><th>$T_{n}$</th><th>$\\frac{2A_{o}A_{\\ell}f_{y}}{p_{h}}$</th>'
+           '<th>$\\tan \\theta$</th></tr></thead><tbody><tr></tbody></table>')
+    eq = appmod.append_bbox_item(probe2, 1, art + " (22.5.1.10a)", "equation")
+    check(eq["content"] == "$T_{n}$ $\\frac{2A_{o}A_{\\ell}f_{y}}{p_{h}}$ $\\tan \\theta$ (22.5.1.10a)"
+          and eq.get("eq_num") == "22.5.1.10a",
+          "equation bbox strips HTML table wrapper, keeps math + eq key")
+    tx = appmod.append_bbox_item(probe2, 1, art, "text")
+    check(tx["content"] == "$T_{n}$ $\\frac{2A_{o}A_{\\ell}f_{y}}{p_{h}}$ $\\tan \\theta$"
+          and tx["has_inline_math"],
+          "text bbox also strips HTML table wrapper, flags inline math")
+    tb = appmod.append_bbox_item(probe2, 1, art, "table")
+    check(tb["content"] == art, "forced table bbox keeps raw wrapper text")
+
     # bbox route input validation (no live OCR call)
     r = client.post(f"/bbox_ocr/{doc_id}", json={"page": 1})
     check(r.status_code == 400, "bbox OCR rejects missing coords")
@@ -250,6 +308,11 @@ def main():
     check(r.status_code == 400, "bbox OCR rejects NaN coords")
     r = client.post(f"/bbox_ocr/{doc_id}", json={"page": 99, "x": 0, "y": 0, "w": .5, "h": .5})
     check(r.status_code == 404, "bbox OCR rejects out-of-range page")
+    r = client.post(f"/bbox_ocr/{doc_id}", json={"page": 1, "x": 0, "y": 0, "w": .5, "h": .5, "type": "wat"})
+    check(r.status_code == 400, "bbox OCR rejects invalid type before OCR")
+    r = client.post(f"/bbox_ocr/{doc_id}", json={"page": 1, "x": 0, "y": 0, "w": .5, "h": .5, "type": "equation"})
+    check(r.status_code == 502 and "UNSLOTH_API_KEY" in r.get_json().get("error", ""),
+          "valid forced type passes validation, reaches OCR (no-key error)")
 
     # caption route input validation (no live OCR call)
     r = client.post(f"/item/{doc_id}/{table_id}/caption", json={"x": .2, "y": .2})
@@ -342,6 +405,26 @@ def main():
     check(r.status_code == 200 and "smoke" in idx, "/ lists documents")
     check("tex-chtml.js" in idx and "tex-svg.js" not in idx,
           "index uses MathJax CHTML")
+
+    # delete item: restore the parsed doc, accept then delete (copy removed)
+    r = client.post("/load", data={"pdf_path": str(pdf_path), "md_path": str(md_path)})
+    check(r.status_code == 302, "reload for delete test 302")
+    dl_pending = read_json(REPO / "validation" / "pending" / "smoke.json")
+    dl_id = dl_pending["pages"][0]["items"][0]["id"]
+    client.post(f"/item/{doc_id}/{dl_id}/action", json={"action": "accept"})
+    check((REPO / "validation" / "verified" / f"{dl_id}.json").exists(),
+          "verified copy exists before delete")
+    r = client.post(f"/item/{doc_id}/{dl_id}/delete", json={})
+    check(r.status_code == 200, "delete item 200")
+    out = r.get_json()
+    check(not any(dl_id in [i["id"] for i in pg.get("items", [])]
+                  for pg in out["doc"].get("pages", [])),
+          "delete removes item from the pending doc")
+    check(not (REPO / "validation" / "verified" / f"{dl_id}.json").exists()
+          and not (REPO / "validation" / "rejected" / f"{dl_id}.json").exists(),
+          "delete removes verified/rejected copies")
+    r = client.post(f"/item/{doc_id}/does-not-exist/delete", json={})
+    check(r.status_code == 404, "delete unknown item 404")
 
     # discard document: pending record + verified/rejected item copies removed
     r = client.post(f"/doc/{doc_id}/discard")

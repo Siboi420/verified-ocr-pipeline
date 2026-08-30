@@ -77,7 +77,8 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
 - `app.py` — Flask routes: `/`, `/load` (paths), `/upload` (multipart, optional md,
   optional `ocr_pages` form field), `/ocr/<doc_id>` (async job), `/jobs/<id>` (poll,
   live `done`/`total` page counts), `/doc/<id>` (review page),
-  `/page/<doc_id>/<n>.png` (rendered, cached), `/item/.../action`, `/bulk`.
+  `/page/<doc_id>/<n>.png` (rendered, cached), `/item/.../action`, `/item/.../delete`,
+  `/bulk`.
   Jobs are an **in-memory dict** — lost on restart. `upload()` validates `ocr_pages`
   (`N`, `N-M`, or comma-separated like `2-3, 4-9`, 1-indexed; invalid -> 400) and
   stores `doc["ocr_pages"]` as a list of `[start, end]` pairs (e.g. `[[2,3],[4,9]]`;
@@ -94,11 +95,25 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   verified/rejected JSON. Accept-with-new-content also updates an already-verified
   item (used when re-editing a merged table). For `equation` items, accept/reject
   payloads also carry `eq_num`/`eq_letters` (the cross-reference key, e.g.
-  "22.5.1.10a" + "a") when present, and accepting with EDITED content re-derives
-  them from the new text via `eq_refs` (itemizer's capture stands until edited,
-  so unedited accepts never clobber it). `/bulk` accepts
+  "22.5.1.10a" + "a") whenever the client sends them: `None` = untouched,
+  `""` = clears the key — the key is **never re-derived from the text**
+  (the old edit→accept `eq_refs` re-derivation that clobbered a manually-fixed
+  key is gone). `/bulk` accepts
   `skip|accept|reject` with the same semantics: skip never touches finalized items,
   accept/reject flip them; already-in-target-state items are no-ops.
+  The draw-box route `/bbox_ocr` accepts an optional `type` (`auto` default, or
+  `equation`/`table`/`text`, validated with 400 **before** OCR runs): `auto` keeps
+  the old parse-the-crop + caption-attach behavior, forced kinds append ONE item
+  via `append_bbox_item` (raw OCR text as `content`, no caption attach; `text`
+  sets `has_inline_math` from `INLINE_MATH_RE`, `equation` captures
+  `eq_num`/`eq_letters` via `eq_refs`, and `chapter`/`section` inherit from the
+  page's latest item that carries them). Forced **equation** draws use
+  `EQUATION_PROMPT` (LaTeX math only — GLM otherwise wraps equation crops in
+  HTML `<table>` artifacts under the generic markdown prompt). `equation`/`text`
+  kinds are defensively stripped of HTML table wrapper tags (`HTML_TABLE_TAG_RE`,
+  math/content kept; forced `table` draws keep the raw text since the wrapper may
+  be the only structure). `/item/<id>/delete` removes an item from
+  its page and unlinks both `verified/` and `rejected/` copies (404 if missing).
 - `rag_uploader.py` — reads `validation/verified/*.json`, groups items by
   `doc_id`, renders one markdown file per source doc (`source_name` header, per-item
   `## page N <type> — <section>` titles, section is the full dotted heading;
@@ -118,7 +133,10 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   CLI `--pages` uses the single-range form),
   `ocr_page`/`ocr_batch(workers=2, max_tokens_per_page=8192, on_progress=None)`
   (`on_progress(done, total)`
-  fires after each completed page), `assemble_markdown`. Timeouts were raised to
+  fires after each completed page), `assemble_markdown`, and prompt constants
+  `OCR_PROMPT`, `CAPTION_BAND_PROMPT` (caption crops — GLM drops/disfigures
+  tiny regions under the generic prompt), `EQUATION_PROMPT` (draw-box equation
+  mode — output LaTeX math only, no tables/HTML). Timeouts were raised to
   600s (GLM-OCR f16-on-CPU read timed out at 120s; now GPU so fine). Payload is
   non-streaming chat completions — see note below. `max_tokens_per_page` default
   was 4096; most pages exceeded it (finish_reason="length" → re-send at 2×),
@@ -134,8 +152,9 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   `eq_letters`/`eq_num`, the reference markers GLM-OCR prints OUTSIDE the
   `$$...$$` span ("(a) $$x$$ (22.5.1.10a)"): `eq_refs(front, back)` grabs a
   leading `(a)` and a trailing `(22.5.1.10a)`-style number (letter suffix
-  included), and the reviewer can fix a missing/OCR-dropped number by editing
-  the equation and accepting. `clean_export_text()` strips `# OCR:` titles and
+  included), and the reviewer fixes a missing/OCR-dropped number (or clears a
+  wrong one) via the editor's dedicated eq-number / eq-letters fields — accept
+  never re-derives the key. `clean_export_text()` strips `# OCR:` titles and
   standalone CODE/COMMENTARY markers — applied **at export only** (verified JSON,
   not the review UI/doc).
 - `templates/index.html` — single-page JS UI. Has an `autoOcr()` + `?ocr=1` gate
@@ -184,6 +203,14 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   (zoom re-measured on window resize). `imgFrac()` **clamps to [0,1]** so a draw-box drag
   that ends outside the zoomed image never sends out-of-range fractions to the server.
   Equation items display their markers (`(a) (22.5.1.10a)`) in the item meta line.
+  Their Edit + Accept editor adds pre-filled eq-number / eq-letters inputs
+  (emptying a field clears that part of the key) so the key is edited in its own
+  fields, not derived from the equation text. The draw-box toolbar has a type
+  selector (`bboxType`: `auto` default / `equation` / `table` / `text + inline
+  math`), forwarded as the `type` field on the `/bbox_ocr` POST (the caption-box
+  flow is untouched). Every item has a Delete button — `confirm()` then POST
+  `/item/<doc>/<item>/delete`, re-render, no cursor advance; the item and its
+  verified/rejected copies are removed.
 - `validation/` — `pending/` (docs), `verified/`, `rejected/` (per-item JSON), `uploads/<doc_id>/` (pdf, md, page PNGs).
 
 ## Current state (verified facts — don't contradict)
@@ -206,6 +233,12 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   doesn't extract; investigation was in progress (GLM-OCR directed at page 1 returns only
   the cost table). Not resolved.
 - Jobs dict is in-memory (restart loses jobs). `UNSLOTH_API_KEY` is required.
+- Equation keys are edited via dedicated eq-number/eq-letters inputs in the
+  Edit + Accept editor and are never auto-re-derived on accept (None = untouched,
+  "" = cleared). The draw-box has a type selector (`bboxType`, auto default;
+  forced kinds append a single item via `append_bbox_item`; equation draws use
+  a dedicated LaTeX-only prompt plus a defensive HTML-table-tag strip). Items can be
+  deleted (item + verified/rejected copies removed).
 
 ## Known gotchas / foot-guns
 
@@ -225,10 +258,12 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
 ## Tests / verification
 
 - `python3 test_itemizer.py` — 66 itemizer assertions.
-- `python3 smoke_test.py` — 89 end-to-end checks via Flask test client (no live OCR;
+- `python3 smoke_test.py` — 111 end-to-end checks via Flask test client (no live OCR;
   asserts `?ocr=1` redirect, no-key OCR error, `parse_page_range`/`parse_page_ranges`
   valid+invalid forms, `ocr_pages` storage incl. multiple ranges, invalid -> 400,
-  md-wins-over-range, NaN bbox coords rejected).
+  md-wins-over-range, NaN bbox coords rejected, equation key accept/preserve/clear,
+  `append_bbox_item` kinds (incl. HTML-table-wrapper strip for equation/text,
+  raw-keep for table), bbox `type` validation, item delete).
 - A quick GPU/alive check: `curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:5000/`
   (app) and `:8888` (unsloth); `nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader`
   should show >0% during OCR.

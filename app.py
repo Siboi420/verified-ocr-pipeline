@@ -14,8 +14,8 @@ from pathlib import Path
 from flask import Flask, abort, jsonify, redirect, render_template, request, send_file  # pyright: ignore[reportMissingImports] — env lacks flask; runtime python3 has it
 
 import config
-from itemizer import clean_export_text, eq_refs, parse_document, parse_table_caption, pick_caption_from_band, unwrap_html_caption  # pyright: ignore[reportMissingImports] — same-dir module
-from ocr_engine import CAPTION_BAND_PROMPT, assemble_markdown, ocr_batch, ocr_page, parse_page_ranges, pdf_to_images, tesseract_ocr
+from itemizer import INLINE_MATH_RE, clean_export_text, eq_refs, parse_document, parse_table_caption, pick_caption_from_band, unwrap_html_caption  # pyright: ignore[reportMissingImports] — same-dir module
+from ocr_engine import CAPTION_BAND_PROMPT, EQUATION_PROMPT, OCR_PROMPT, assemble_markdown, ocr_batch, ocr_page, parse_page_ranges, pdf_to_images, tesseract_ocr
 
 BASE = Path(__file__).resolve().parent
 VALIDATION = BASE / "validation"
@@ -88,6 +88,16 @@ def parse_and_persist(doc):
     return doc
 
 
+def _target_page(doc, page):
+    """Get (creating if needed) the page dict for a page number."""
+    target = next((p for p in doc.get("pages", []) if p["page"] == page), None)
+    if target is None:
+        target = {"page": page, "items": []}
+        doc.setdefault("pages", []).append(target)
+        doc["pages"].sort(key=lambda p: p["page"])
+    return target
+
+
 def append_bbox_items(doc, page, markdown):
     """Parse a crop's OCR text and append its items to the target page.
 
@@ -98,11 +108,7 @@ def append_bbox_items(doc, page, markdown):
     ]
     if not new_items:
         return 0
-    target = next((p for p in doc.get("pages", []) if p["page"] == page), None)
-    if target is None:
-        target = {"page": page, "items": []}
-        doc.setdefault("pages", []).append(target)
-        doc["pages"].sort(key=lambda p: p["page"])
+    target = _target_page(doc, page)
     for it in new_items:
         it["id"] = f"{doc['doc_id']}-p{page}-bbox{uuid.uuid4().hex[:8]}"
         it["status"] = "pending"
@@ -110,8 +116,64 @@ def append_bbox_items(doc, page, markdown):
     return len(new_items)
 
 
-def apply_action(doc, item_id, action, content=None, table_spans=None):
-    """Update an item's status in doc; write verified/rejected JSON copies."""
+# GLM sometimes wraps drawn crops in HTML <table> markup under any prompt;
+# strip just the wrapper tags (math spans can legitimately contain other chars).
+# Table kinds keep the raw text: the wrapper may be the only structure for a
+# forced table draw (auto mode converts HTML tables properly).
+HTML_TABLE_TAG_RE = re.compile(
+    r"</?(?:table|thead|tbody|tfoot|tr|th|td)\b[^>]*>", re.IGNORECASE
+)
+
+
+def append_bbox_item(doc, page, text, kind):
+    """Append ONE item of a forced kind from a crop's OCR text (no parsing).
+
+    kind is 'equation' | 'table' | 'text' (caller validates). Inherits
+    chapter/section from the page's latest item that carries them. Equation
+    kinds capture eq_letters/eq_num via eq_refs; text kinds flag inline math.
+    Returns the new item.
+    """
+    target = _target_page(doc, page)
+    content = text.strip()
+    if kind in ("equation", "text"):
+        # drop the HTML table wrapper GLM sometimes emits; keep the content
+        cleaned = HTML_TABLE_TAG_RE.sub(" ", content)
+        if cleaned != content:
+            content = re.sub(r"\s+", " ", cleaned).strip()
+    item = {
+        "id": f"{doc['doc_id']}-p{page}-bbox{uuid.uuid4().hex[:8]}",
+        "status": "pending",
+        "type": kind,
+        "content": content,
+        "chapter": None,
+        "section": None,
+    }
+    if kind == "text":
+        item["has_inline_math"] = bool(INLINE_MATH_RE.search(content))
+    if kind == "equation":
+        letters, num = eq_refs(content, content)
+        if letters is not None:
+            item["eq_letters"] = letters
+        if num is not None:
+            item["eq_num"] = num
+    for prev in reversed(target["items"]):  # inherit from latest item that has it
+        if prev.get("chapter") is not None:
+            item["chapter"] = prev["chapter"]
+        if prev.get("section") is not None:
+            item["section"] = prev["section"]
+        if item["chapter"] is not None and item["section"] is not None:
+            break
+    target["items"].append(item)
+    return item
+
+
+def apply_action(doc, item_id, action, content=None, table_spans=None, eq_num=None, eq_letters=None):
+    """Update an item's status in doc; write verified/rejected JSON copies.
+
+    eq_num/eq_letters (equation items): None = leave as-is; "" = clear the
+    key; any other string sets it. The client owns the equation key — it is
+    never re-derived from the text here.
+    """
     for page in doc.get("pages", []):
         for item in page["items"]:
             if item["id"] != item_id:
@@ -126,10 +188,18 @@ def apply_action(doc, item_id, action, content=None, table_spans=None):
                 if table_spans is not None:
                     item["table_spans"] = table_spans
                 final = content if content not in (None, "") else item["content"]
-                if item["type"] == "equation" and content not in (None, ""):
-                    # reviewer edited the equation: re-derive markers from the new
-                    # text (itemizer's capture stands unless the text changed)
-                    item["eq_letters"], item["eq_num"] = eq_refs(final, final)
+                if item["type"] == "equation":
+                    # explicit key edits only: None = untouched, "" = cleared
+                    if eq_num is not None:
+                        if eq_num == "":
+                            item.pop("eq_num", None)
+                        else:
+                            item["eq_num"] = eq_num
+                    if eq_letters is not None:
+                        if eq_letters == "":
+                            item.pop("eq_letters", None)
+                        else:
+                            item["eq_letters"] = eq_letters
                 payload = {
                     "doc_id": doc["doc_id"],
                     "item_id": item_id,
@@ -352,11 +422,11 @@ def _render_crop(doc, page, box):
     return tmp
 
 
-def _ocr_page_crop(doc, page, box):
+def _ocr_page_crop(doc, page, box, prompt=OCR_PROMPT):
     """Render a page region and OCR it with GLM-OCR; returns the text."""
     tmp = _render_crop(doc, page, box)
     try:
-        return ocr_page(str(tmp), page_num=page)["text"]
+        return ocr_page(str(tmp), page_num=page, prompt=prompt)["text"]
     finally:
         tmp.unlink(missing_ok=True)
 
@@ -417,6 +487,9 @@ def bbox_ocr(doc_id):
     if doc is None:
         abort(404)
     data = request.get_json(silent=True) or {}
+    btype = data.get("type", "auto")
+    if btype not in ("auto", "equation", "table", "text"):
+        abort(400, "type must be auto|equation|table|text")  # checked before OCR runs
     try:
         page = int(data.get("page", 1))
         box = _parse_box(data)
@@ -424,17 +497,26 @@ def bbox_ocr(doc_id):
         abort(400, "page, x, y, w, h required (fractions of the page, 0..1)")
 
     try:
-        text = _ocr_page_crop(doc, page, box)
+        text = _ocr_page_crop(
+            doc, page, box,
+            prompt=EQUATION_PROMPT if btype == "equation" else OCR_PROMPT,
+        )
     except ValueError as e:
         abort(404, str(e))
     except Exception as e:  # OCR/backend failure -> JSON error, not a crash
         return jsonify({"ok": False, "error": str(e)}), 502
 
-    items_before = set(
-        it["id"] for pg in doc.get("pages", []) for it in pg["items"]
-    )
-    added = append_bbox_items(doc, page, text)
-    _attach_caption_to_first_table(doc, page, box, items_before)
+    if btype == "auto":
+        items_before = set(
+            it["id"] for pg in doc.get("pages", []) for it in pg["items"]
+        )
+        added = append_bbox_items(doc, page, text)
+        _attach_caption_to_first_table(doc, page, box, items_before)
+    else:
+        added = 0  # forced kind: one item, no auto-parsing/caption attach
+        if text.strip():
+            append_bbox_item(doc, page, text, btype)
+            added = 1
     save_doc(doc)
     return jsonify({"ok": True, "doc": doc, "added": added})
 
@@ -538,8 +620,42 @@ def item_action(doc_id, item_id):
     action = data.get("action")
     if action not in ("accept", "reject", "skip"):
         abort(400, "action must be accept|reject|skip")
-    if not apply_action(doc, item_id, action, data.get("content"), data.get("table_spans")):
+    if not apply_action(
+        doc, item_id, action,
+        content=data.get("content"),
+        table_spans=data.get("table_spans"),
+        eq_num=data.get("eq_num"),
+        eq_letters=data.get("eq_letters"),
+    ):
         abort(404, f"item {item_id} not found")
+    save_doc(doc)
+    return jsonify({"ok": True, "doc": doc})
+
+
+@app.route("/item/<doc_id>/<item_id>/delete", methods=["POST"])
+def item_delete(doc_id, item_id):
+    """Remove an item from its page and drop both verified/rejected copies."""
+    if (
+        not re.fullmatch(r"[A-Za-z0-9._-]+", doc_id)
+        or not re.fullmatch(r"[A-Za-z0-9._-]+", item_id)
+    ):
+        abort(404)
+    doc = load_doc(doc_id)
+    if doc is None:
+        abort(404)
+    removed = False
+    for page in doc.get("pages", []):
+        for item in page["items"]:
+            if item["id"] == item_id:
+                page["items"].remove(item)
+                removed = True
+                break
+        if removed:
+            break
+    if not removed:
+        abort(404, f"item {item_id} not found")
+    for d in (VERIFIED_DIR, REJECTED_DIR):
+        (d / f"{item_id}.json").unlink(missing_ok=True)
     save_doc(doc)
     return jsonify({"ok": True, "doc": doc})
 

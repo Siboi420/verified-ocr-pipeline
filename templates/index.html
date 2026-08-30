@@ -81,6 +81,14 @@ window.MathJax = {tex: {inlineMath: [["\\(", "\\)"], ["$", "$"]]}};
     </select>
   </label>
   <span style="flex:1"></span>
+  <label class="muted">draw box type:
+    <select id="bboxType">
+      <option value="auto" selected>auto</option>
+      <option value="equation">equation</option>
+      <option value="table">table</option>
+      <option value="text">text + inline math</option>
+    </select>
+  </label>
   <button id="bboxBtn" title="drag on the page to OCR that region only">Draw box</button>
   <button id="bulkSkip">Pass for now (selected)</button>
   <button id="bulkAccept">Accept selected</button>
@@ -423,6 +431,14 @@ function itemContent(el) {
   const ed = el.querySelector(".editor");
   if (ed) {
     if (ed.dataset.kind === "table") return {content: tableToMarkdown(ed), table_spans: getSpans(ed)};
+    if (ed.dataset.kind === "equation") {
+      // eq_num/eq_letters always sent ("" clears the key server-side)
+      return {
+        content: ed.querySelector("textarea").value,
+        eq_num: ed.querySelector("input.eqnum").value.trim(),
+        eq_letters: ed.querySelector("input.eqletters").value.trim(),
+      };
+    }
     return ed.querySelector("textarea").value;
   }
   return el.dataset.content;
@@ -437,6 +453,8 @@ function renderItem(it) {
   el.dataset.id = it.id;
   el.dataset.type = it.type;
   el.dataset.content = it.content;
+  el.dataset.eqNum = it.eq_num || "";
+  el.dataset.eqLetters = it.eq_letters || "";
 
   const head = document.createElement("div");
   const badge = document.createElement("span");
@@ -484,7 +502,8 @@ function renderItem(it) {
     <button class="act accept">Accept</button>
     <button class="act edit">Edit + Accept</button>
     <button class="act reject">Reject</button>
-    <button class="act skip">Skip</button>`;
+    <button class="act skip">Skip</button>
+    <button class="act del">Delete</button>`;
   if (it.type === "table") {
     const capBox = document.createElement("button");
     capBox.className = "act capbox";
@@ -520,6 +539,30 @@ function openEditor(el) {
     ta.style.width = "100%";
     ta.value = el.dataset.content;
     ed.appendChild(ta);
+    // the equation key is edited in its own fields, never derived from the text
+    const row = document.createElement("div");
+    row.className = "row";
+    const numLbl = document.createElement("label");
+    numLbl.className = "muted";
+    numLbl.appendChild(document.createTextNode("eq number "));
+    const numIn = document.createElement("input");
+    numIn.type = "text";
+    numIn.className = "eqnum";
+    numIn.placeholder = "(x.x.x)";
+    numIn.value = el.dataset.eqNum || "";
+    numLbl.appendChild(numIn);
+    const letLbl = document.createElement("label");
+    letLbl.className = "muted";
+    letLbl.appendChild(document.createTextNode("eq letters "));
+    const letIn = document.createElement("input");
+    letIn.type = "text";
+    letIn.className = "eqletters";
+    letIn.placeholder = "(a)";
+    letIn.value = el.dataset.eqLetters || "";
+    letLbl.appendChild(letIn);
+    row.appendChild(numLbl);
+    row.appendChild(letLbl);
+    ed.appendChild(row);
   } else {
     const ta = document.createElement("textarea");
     ta.rows = 4;
@@ -615,8 +658,10 @@ async function act(itemId, action, content) {
     const body = {action};
     if (content !== undefined) {
       if (typeof content === "object" && content !== null && "content" in content) {
-        body.content = content.content;                         // table editor payload: {content, table_spans}
+        body.content = content.content;                         // editor payload: {content, table_spans, eq_num, eq_letters}
         if (content.table_spans) body.table_spans = content.table_spans;
+        if (content.eq_num !== undefined) body.eq_num = content.eq_num;
+        if (content.eq_letters !== undefined) body.eq_letters = content.eq_letters;
       } else {
         body.content = content;
       }
@@ -683,6 +728,12 @@ document.getElementById("items").addEventListener("click", async e => {
     await act(itemId, "reject");
   } else if (cls.includes("skip")) {
     await act(itemId, "skip");
+  } else if (cls.includes("del")) {
+    if (!confirm("Delete this item?")) return;
+    const out = await post(`/item/${DOC.doc_id}/${itemId}/delete`, {});
+    Object.assign(DOC, out.doc);
+    cursorId = null;
+    render();
   }
 });
 
@@ -857,7 +908,7 @@ window.addEventListener("mouseup", async e => {
   }
   bar.textContent = "OCR of region in progress…";
   try {
-    const out = await post(`/bbox_ocr/${DOC.doc_id}`, {page: pageNo, ...r});
+    const out = await post(`/bbox_ocr/${DOC.doc_id}`, {page: pageNo, ...r, type: document.getElementById("bboxType").value});
     Object.assign(DOC, out.doc);
     bar.textContent = `added ${out.added} item(s) from region`;
     setTimeout(() => bar.style.display = "none", 2500);

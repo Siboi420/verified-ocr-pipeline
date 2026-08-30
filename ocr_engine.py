@@ -39,6 +39,14 @@ CAPTION_BAND_PROMPT = (
     "If it is a table caption, start it with 'Table'."
 )
 
+# Dedicated prompt for equation crops: under the generic markdown prompt GLM
+# often wraps equation regions in HTML <table> artifacts instead of math.
+EQUATION_PROMPT = (
+    "Transcribe the mathematical expressions in this image as LaTeX, "
+    "each between $$...$$ markers. "
+    "Output math only: no tables, no HTML markup, no surrounding text."
+)
+
 
 # ── Image Encoding ──────────────────────────────────────────────────────────
 
