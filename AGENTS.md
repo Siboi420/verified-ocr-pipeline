@@ -122,8 +122,12 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   section is **backfilled from the eq key's own dotted prefix** (an ACI eq number
   encodes its section), and the matching provision statement is **folded into the
   equation chunk** (matched by dotted number across the page, position-independent
-  because itemizer re-orders page items by type; R-commentary excluded; ≤400
-  chars). Items order by the numeric index of `item_id` (lexical sort put i10
+  because itemizer re-orders page items by type; falls back to the parent
+  provision for sub-lettered equations and to the previous page where a provision
+  starts; multiple same-key statements prefer the provision (“shall…”) over
+  R-commentary (“is assumed…”); R-commentary equations and unverified
+  statements stay unfolded — current ACI export: 43 eq chunks, 30 folded). Items
+  order by the numeric index of `item_id` (lexical sort put i10
   before i2)
   and uploads to an Unsloth Studio RAG KB (`/api/rag/knowledge-bases`, name via
   `--kb`, default "Verified OCR"). Server-side chunking + embeddings. Skips

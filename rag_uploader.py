@@ -35,6 +35,14 @@ def _eq_section(num):
     return m.group(1) if m else None
 
 
+def _eq_parent(section):
+    """The parent provision of a section ("22.5.6.3.1" -> "22.5.6.3");
+    None for a top-level dotted number. Sub-lettered equations (22.5.6.3.1c)
+    are introduced by their parent provision ("22.5.6.3 For…")."""
+    parts = (section or "").split(".")
+    return ".".join(parts[:-1]) if len(parts) > 1 else None
+
+
 def _stmt_key(content):
     """Dotted provision number a statement's marker carries
     ("**22.5.1.2** Cross-sectional…" -> "22.5.1.2"); None for non-statements
@@ -46,6 +54,20 @@ def _stmt_key(content):
     if not m or m.group(1):
         return None
     return m.group(2)
+
+
+def _statement_score(text):
+    """Higher = more provision-like (the direct rule that introduces an
+    equation, "…shall be calculated by:") vs R-commentary explanation."""
+    s = text.strip()
+    score = 0
+    if "shall" in s:
+        score += 2
+    if "calculated by" in s or "satisfy" in s or "shall be" in s:
+        score += 1
+    if s.startswith("R"):
+        score -= 3  # commentary
+    return score
 
 
 API_BASE = os.environ.get("UNSLOTH_API_BASE", "http://127.0.0.1:8888")
@@ -122,9 +144,15 @@ def render_markdown(items):
         if it.get("type") == "text":
             key = _stmt_key(it.get("content") or "")
             if key:
-                stmts.setdefault(it["page"], {}).setdefault(
-                    key, (it.get("content") or "").strip()
-                )
+                text = (it.get("content") or "").strip()
+                pg = stmts.setdefault(it["page"], {})
+                prev = pg.get(key)
+                # several statements can share a number (22.5.1.1 appears in
+                # both the provision and R-commentary); keep the provision
+                # ("shall…") over the commentary ("is assumed…") — iteration
+                # order is alphabetical, which picked the commentary before.
+                if prev is None or _statement_score(text) > _statement_score(prev):
+                    pg[key] = text
     body = []
     for it in sorted(items, key=lambda x: (x["page"], _item_order(x))):
         content = (it.get("content") or "").strip()
@@ -146,7 +174,13 @@ def render_markdown(items):
         if it.get("type") == "equation":
             key = _eq_section(it.get("eq_num"))
             if key:
-                fold = stmts.get(it["page"], {}).get(key, "")
+                # the introducing provision may start on the previous page
+                for pg in (it["page"], it["page"] - 1):
+                    fold = stmts.get(pg, {}).get(key, "")
+                    if not fold:  # sub-lettered eq: try the parent provision
+                        fold = stmts.get(pg, {}).get(_eq_parent(key) or "", "")
+                    if fold:
+                        break
         header_note = f"\n\n{fold}" if fold else ""
         body.append(f"{title}{header_note}\n\n{content}")
     return header + "\n\n".join(body) + "\n"
@@ -191,11 +225,27 @@ def _selftest():
         (td / "a-p1-i3.json").write_text(json.dumps(
             {"doc_id": "a", "item_id": "a-p1-i3", "page": 1, "type": "text",
              "chapter": None, "section": None, "source_name": "a.pdf",
-             "content": "**22.5.1.2** Cross-sectional dimensions shall be selected to satisfy Eq. (22.5.1.2)."}))
+             "content": "22.5.1.1 In a member without shear reinforcement, shear is assumed to be resisted by the concrete."}))
         (td / "a-p1-i4.json").write_text(json.dumps(
             {"doc_id": "a", "item_id": "a-p1-i4", "page": 1, "type": "text",
              "chapter": None, "section": None, "source_name": "a.pdf",
+             "content": "**22.5.1.1** Nominal one-way shear strength at a section, $V_n$, shall be calculated by:"}))
+        (td / "a-p1-i5.json").write_text(json.dumps(
+            {"doc_id": "a", "item_id": "a-p1-i5", "page": 1, "type": "equation",
+             "chapter": None, "section": None, "source_name": "a.pdf",
+             "eq_num": "22.5.1.1", "content": "V_n = V_c + V_s"}))
+        (td / "a-p1-i6.json").write_text(json.dumps(
+            {"doc_id": "a", "item_id": "a-p1-i6", "page": 1, "type": "text",
+             "chapter": None, "section": None, "source_name": "a.pdf",
              "content": "**R22.5.1.2** The limit on cross-sectional dimensions is commentary."}))
+        (td / "a-p1-i7.json").write_text(json.dumps(
+            {"doc_id": "a", "item_id": "a-p1-i7", "page": 1, "type": "text",
+             "chapter": None, "section": None, "source_name": "a.pdf",
+             "content": "22.5.6.3 For prestressed members, $V_c$ shall be permitted to be the lesser of $V_{ci}$ and $V_{cw}$."}))
+        (td / "a-p1-i8.json").write_text(json.dumps(
+            {"doc_id": "a", "item_id": "a-p1-i8", "page": 1, "type": "equation",
+             "chapter": None, "section": None, "source_name": "a.pdf",
+             "eq_num": "22.5.6.3.1c", "content": "V_{ci} = 0.17\\lambda \\sqrt{f'_c}b_wd"}))
         (td / "b-p3-i4.json").write_text(json.dumps(
             {"doc_id": "b", "item_id": "b-p3-i4", "page": 3, "type": "table",
              "chapter": None, "section": "4.1.1", "source_name": "b.pdf",
@@ -207,12 +257,12 @@ def _selftest():
         assert "# a.pdf" in md_a and "— 5.3" in md_a, md_a  # section is full dotted path
         assert "5.5.3" not in md_a
         assert "second" not in md_a and "empty" not in md_a  # empty item skipped
-        # equation with no section: key backfills it AND the introducing
-        # provision statement is folded into the equation chunk (matched by
-        # number, position-independent; R-commentary excluded)
-        eq_chunk = md_a.split("## page 1 equation · eq(22.5.1.2) — 22.5.1.2")[1].split("## page 1 text")[0]
-        assert "**22.5.1.2** Cross-sectional dimensions shall be selected" in eq_chunk, eq_chunk
-        assert "The limit on cross" not in eq_chunk, eq_chunk  # R-commentary not folded
+        # sub-lettered equation folds its PARENT provision (22.5.6.3.1c <- 22.5.6.3)
+        sub_chunk = md_a.split("## page 1 equation · eq(22.5.6.3.1c) — 22.5.6.3.1")[1].split("## page 1 text")[0]
+        assert "22.5.6.3 For prestressed members" in sub_chunk, sub_chunk
+        assert _eq_parent("22.5.6.3.1") == "22.5.6.3" and _eq_parent("22.5.1.2") == "22.5.1"
+        assert _eq_parent("22.1") == "22"
+
         assert _eq_section("22.5.6.3.1a") == "22.5.6.3.1" and _eq_section("R22.5.6.2") == "R22.5.6.2"
         assert _eq_section(None) is None and _eq_section("") is None
         # R-commentary has no key, so _stmt_key returns None for it
