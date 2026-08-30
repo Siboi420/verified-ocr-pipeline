@@ -184,6 +184,25 @@ R21.2.1 Commentary.
     check(r["section"] == "R21.2.1" and r["section"] != "21.2.1",
           "R-prefixed heading is its own section")
 
+    # GLM-OCR bolds provision markers ("**22.5.1.2** Cross-sectional…");
+    # the section is still stamped and the following equation inherits it.
+    md_bold = """--- Page 1 ---
+**CHAPTER 22**
+
+**22.5.1.2** Cross-sectional dimensions shall be selected.
+
+$$
+V_u \\leq \\phi(V_c + 0.66\\sqrt{f_c'}b_w d)
+$$
+"""
+    p = itemizer.parse_document(md_bold, "d")[0]["items"]
+    st = next(it for it in p if "22.5.1.2" in it["content"] and "$$$" not in it["content"])
+    check(st["section"] == "22.5.1.2" and st["chapter"] == "22",
+          "bold **22.5.1.2** marker still stamps section/chapter")
+    eqb = next(it for it in p if it["type"] == "equation")
+    check(eqb["section"] == "22.5.1.2" and eqb["chapter"] == "22",
+          "equation after a bold provision inherits section/chapter")
+
     # Section state resets per page; None before the first heading.
     pgs = itemizer.parse_document("--- Page 1 ---\n21.3.1 Heading.\n\n--- Page 2 ---\nText without heading.\n", "d")
     check(pgs[1]["items"][0]["section"] is None, "section resets across pages")

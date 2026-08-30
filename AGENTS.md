@@ -118,7 +118,13 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   `doc_id`, renders one markdown file per source doc (`source_name` header, per-item
   `## page N <type> — <section>` titles, section is the full dotted heading;
   equation items with `eq_num` get a ` · eq(N)` title suffix so the KB text
-  carries the resolvable key)
+  carries the resolvable key). Render-time hardening for equations: a missing
+  section is **backfilled from the eq key's own dotted prefix** (an ACI eq number
+  encodes its section), and the matching provision statement is **folded into the
+  equation chunk** (matched by dotted number across the page, position-independent
+  because itemizer re-orders page items by type; R-commentary excluded; ≤400
+  chars). Items order by the numeric index of `item_id` (lexical sort put i10
+  before i2)
   and uploads to an Unsloth Studio RAG KB (`/api/rag/knowledge-bases`, name via
   `--kb`, default "Verified OCR"). Server-side chunking + embeddings. Skips
   unreadable JSON **and stale pre-metadata exports** (missing `source_name` — the
@@ -148,7 +154,9 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   (`\(...\)` / `$...$`). Item order: equation → table → text-math → text, per page.
   Every item carries `chapter`/`section` (nearest preceding `CHAPTER N` / dotted
   heading, `R21.2.1` kept, both reset per page; line-start anchored so inline
-  refs/decimals never match). Equation items additionally may carry
+  refs/decimals never match; GLM-OCR bolds provision markers
+  (`**22.5.1.2**`), so an optional `**` prefix is tolerated in the section and
+  chapter regexes). Equation items additionally may carry
   `eq_letters`/`eq_num`, the reference markers GLM-OCR prints OUTSIDE the
   `$$...$$` span ("(a) $$x$$ (22.5.1.10a)"): `eq_refs(front, back)` grabs a
   leading `(a)` and a trailing `(22.5.1.10a)`-style number (letter suffix
@@ -233,6 +241,14 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   doesn't extract; investigation was in progress (GLM-OCR directed at page 1 returns only
   the cost table). Not resolved.
 - Jobs dict is in-memory (restart loses jobs). `UNSLOTH_API_KEY` is required.
+- **Eq-key/section context (resolved):** ACI pages where GLM-OCR bolds
+  provision markers (`**22.5.1.2**`) previously stamped `section=None` on every
+  item of that page (e.g. the whole of page 404), so equation chunks lacked a
+  section anchor and models fell back to recall. Fixed at **parse** (itemizer
+  regexes tolerate `**` bold prefixes — future docs) and at **render**
+  (rag_uploader backfills the section from the eq key and folds the provision
+  statement into equation chunks — applies to the existing verified set, no
+  re-OCR: current ACI export backfills 11 eq sections, folds 3 statements).
 - Equation keys are edited via dedicated eq-number/eq-letters inputs in the
   Edit + Accept editor and are never auto-re-derived on accept (None = untouched,
   "" = cleared). The draw-box has a type selector (`bboxType`, auto default;
@@ -257,7 +273,7 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
 
 ## Tests / verification
 
-- `python3 test_itemizer.py` — 66 itemizer assertions.
+- `python3 test_itemizer.py` — 68 itemizer assertions.
 - `python3 smoke_test.py` — 111 end-to-end checks via Flask test client (no live OCR;
   asserts `?ocr=1` redirect, no-key OCR error, `parse_page_range`/`parse_page_ranges`
   valid+invalid forms, `ocr_pages` storage incl. multiple ranges, invalid -> 400,

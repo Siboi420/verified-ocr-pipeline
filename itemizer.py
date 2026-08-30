@@ -29,12 +29,16 @@ EQ_LETTER_HEAD_RE = re.compile(r"^\s*\(([a-z])\)")          # "(a) ..."
 EQ_NUM_TAIL_RE = re.compile(r"\((\d+(?:\.\d+)*(?:[a-z])?)\)\s*$")  # "... (22.5.1.10a)"
 
 # Chapter heading: "CHAPTER 21—..." / "Chapter 11" (word prefix, any digit count).
-CHAPTER_RE = re.compile(r"^\s*CHAPTER\s+(\d+)\b", re.IGNORECASE)
+CHAPTER_RE = re.compile(r"^\*{0,2}\s*CHAPTER\s+(\d+)\b", re.IGNORECASE)
 # Section heading: "21.2", "21.2.1.1.1", "R21.2.1" — 2-5 dotted components.
 # [1-9] first digit guards against decimal prose like "0.65 to 0.90"; a
 # whitespace/dash must follow the number ("The value in accordance with
 # 21.2.1." starts with 'The', so it never matches anyway).
-SECTION_RE = re.compile(r"^((?:R)?[1-9]\d*\.\d+(?:\.\d+){0,3})(?=\s|—|–|-)")
+# GLM-OCR bolds provision/heading numbers (">**22.5.1.2** Cross-section…").
+# Tolerate an optional leading/raw ** marker; [1-9] first digit guards against
+# decimal prose like "0.65 to 0.90"; a whitespace/dash/marker must follow the
+# number ("The value in accordance with 21.2.1." starts with 'The').
+SECTION_RE = re.compile(r"^\*{0,2}((?:R)?[1-9]\d*\.\d+(?:\.\d+){0,3})(?=\s|—|–|-|\*\*)")
 HTML_TABLE_RE = re.compile(
     r"<table\b.*?</table\s*>"  # well-formed
     r"|<table\b.*?</tbody\s*>"  # GLM often omits </table>

@@ -12,9 +12,41 @@ Usage:
 import argparse
 import json
 import os
+import re
 import urllib.error
 import urllib.request
 from pathlib import Path
+
+
+# Equation key -> the section it belongs to: the dotted prefix of the key
+# ("R22.5.6.3.1a" -> "R22.5.6.3.1", "22.5.1.2" -> "22.5.1.2"). ACI keys
+# encode their own section, so this backfills missing section anchors.
+_EQ_SECTION_RE = re.compile(r"^(R?\d+(?:\.\d+){1,4})[a-z]?$")
+
+# A numbered provision/heading statement that can introduce an equation
+# ("**22.5.1.2** Cross-sectional dimensions shall be selected to satisfy…").
+# Captures (R?, number); "**" bold tolerated. R-commentary is excluded
+# downstream — it is context, not the provision itself.
+_STMT_RE = re.compile(r"^\*{0,2}(R)?(\d+(?:\.\d+)+)[a-z]?\*{0,2}(?:\s|—|–|-).+")
+
+
+def _eq_section(num):
+    m = _EQ_SECTION_RE.match(str(num or "").strip().strip("()"))
+    return m.group(1) if m else None
+
+
+def _stmt_key(content):
+    """Dotted provision number a statement's marker carries
+    ("**22.5.1.2** Cross-sectional…" -> "22.5.1.2"); None for non-statements
+    and R-commentary."""
+    c = content.strip()
+    if len(c) > 400:
+        return None
+    m = _STMT_RE.match(c)
+    if not m or m.group(1):
+        return None
+    return m.group(2)
+
 
 API_BASE = os.environ.get("UNSLOTH_API_BASE", "http://127.0.0.1:8888")
 VERIFIED_DIR = Path(__file__).parent / "validation" / "verified"
@@ -64,12 +96,37 @@ def docs_from_verified(verified_dir):
     return by_doc
 
 
+def _item_order(it):
+    """Document order within a page: the trailing numeric index of item_id
+    ("…-p404-i2" -> 2). Fallback 0 keeps bbox-added items (no index) first;
+    stable sort preserves their append order."""
+    try:
+        return int(it.get("item_id", "").rsplit("i", 1)[-1])
+    except ValueError:
+        return 0
+
+
 def render_markdown(items):
     """One markdown doc per source file. Empty content (boilerplate-only
-    items that cleaned to '') is skipped — nothing to index."""
+    items are skipped) is skipped — nothing to index. Equations get
+    their introducing provision statement folded in ("**22.5.1.2**
+    Cross-sectional dimensions…") so the chunk carries the provision it
+    implements, and a missing section anchor is backfilled from the equation
+    key's own dotted prefix (an ACI eq number encodes its section)."""
     header = f"# {items[0]['source_name']}\n"
+    # provision statements per page, keyed by their dotted number. Equation
+    # chunks fold the matching statement — position-independent, because
+    # itemizer re-orders page items by type (equations first, text after).
+    stmts = {}
+    for it in items:
+        if it.get("type") == "text":
+            key = _stmt_key(it.get("content") or "")
+            if key:
+                stmts.setdefault(it["page"], {}).setdefault(
+                    key, (it.get("content") or "").strip()
+                )
     body = []
-    for it in sorted(items, key=lambda x: (x["page"], x["item_id"])):
+    for it in sorted(items, key=lambda x: (x["page"], _item_order(x))):
         content = (it.get("content") or "").strip()
         if not content:
             continue
@@ -77,13 +134,21 @@ def render_markdown(items):
         # equation number is the resolvable cross-reference key ("eq(22.5.1.10a)")
         if it.get("type") == "equation" and it.get("eq_num"):
             title += f" · eq({it['eq_num']})"
-        # section is the full dotted heading ("5.3", "4.1.1"); chapter is
-        # only a context fallback when no dotted heading was stamped.
-        if it.get("section"):
-            title += f" — {it['section']}"
-        elif it.get("chapter"):
-            title += f" — {it['chapter']}"
-        body.append(f"{title}\n\n{content}")
+        # section is the full dotted heading ("5.3", "22.5.1.2"); chapter is
+        # only a context fallback when no dotted heading was stamped. Equation
+        # keys encode their own section, so backfill missing anchors from them.
+        sec = it.get("section") or it.get("chapter")
+        if sec is None and it.get("type") == "equation":
+            sec = _eq_section(it.get("eq_num"))
+        if sec:
+            title += f" — {sec}"
+        fold = ""
+        if it.get("type") == "equation":
+            key = _eq_section(it.get("eq_num"))
+            if key:
+                fold = stmts.get(it["page"], {}).get(key, "")
+        header_note = f"\n\n{fold}" if fold else ""
+        body.append(f"{title}{header_note}\n\n{content}")
     return header + "\n\n".join(body) + "\n"
 
 
@@ -111,6 +176,10 @@ def _selftest():
     import tempfile
     with tempfile.TemporaryDirectory() as td:
         td = Path(td)
+        (td / "a-p1-i0.json").write_text(json.dumps(
+            {"doc_id": "a", "item_id": "a-p1-i0", "page": 1, "type": "equation",
+             "chapter": None, "section": None, "source_name": "a.pdf",
+             "eq_num": "22.5.1.2", "content": "V_u \\leq \\phi(V_c + 0.66\\sqrt{f_c'}b_w d)"}))
         (td / "a-p1-i1.json").write_text(json.dumps(
             {"doc_id": "a", "item_id": "a-p1-i1", "page": 1, "type": "text",
              "chapter": "5", "section": "5.3", "source_name": "a.pdf",
@@ -119,6 +188,14 @@ def _selftest():
             {"doc_id": "a", "item_id": "a-p1-i2", "page": 1, "type": "text",
              "chapter": None, "section": None, "source_name": "a.pdf",
              "content": ""}))  # cleaned-to-empty: must be skipped
+        (td / "a-p1-i3.json").write_text(json.dumps(
+            {"doc_id": "a", "item_id": "a-p1-i3", "page": 1, "type": "text",
+             "chapter": None, "section": None, "source_name": "a.pdf",
+             "content": "**22.5.1.2** Cross-sectional dimensions shall be selected to satisfy Eq. (22.5.1.2)."}))
+        (td / "a-p1-i4.json").write_text(json.dumps(
+            {"doc_id": "a", "item_id": "a-p1-i4", "page": 1, "type": "text",
+             "chapter": None, "section": None, "source_name": "a.pdf",
+             "content": "**R22.5.1.2** The limit on cross-sectional dimensions is commentary."}))
         (td / "b-p3-i4.json").write_text(json.dumps(
             {"doc_id": "b", "item_id": "b-p3-i4", "page": 3, "type": "table",
              "chapter": None, "section": "4.1.1", "source_name": "b.pdf",
@@ -130,6 +207,16 @@ def _selftest():
         assert "# a.pdf" in md_a and "— 5.3" in md_a, md_a  # section is full dotted path
         assert "5.5.3" not in md_a
         assert "second" not in md_a and "empty" not in md_a  # empty item skipped
+        # equation with no section: key backfills it AND the introducing
+        # provision statement is folded into the equation chunk (matched by
+        # number, position-independent; R-commentary excluded)
+        eq_chunk = md_a.split("## page 1 equation · eq(22.5.1.2) — 22.5.1.2")[1].split("## page 1 text")[0]
+        assert "**22.5.1.2** Cross-sectional dimensions shall be selected" in eq_chunk, eq_chunk
+        assert "The limit on cross" not in eq_chunk, eq_chunk  # R-commentary not folded
+        assert _eq_section("22.5.6.3.1a") == "22.5.6.3.1" and _eq_section("R22.5.6.2") == "R22.5.6.2"
+        assert _eq_section(None) is None and _eq_section("") is None
+        # R-commentary has no key, so _stmt_key returns None for it
+        assert _stmt_key("**R22.5.1.2** The limit on cross") is None
         md_b = render_markdown(by_doc["b"])
         assert "4.1.1" in md_b and "|x|y|" in md_b
     print("selftest: ok")
