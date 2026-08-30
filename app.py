@@ -117,7 +117,9 @@ def apply_action(doc, item_id, action, content=None):
             if item["id"] != item_id:
                 continue
             if item["status"] in ("verified", "rejected"):
-                return True  # already finalized: further actions are no-ops
+                # finalized; only an explicit flip to the OTHER state is allowed
+                if action == "skip" or item["status"] == ("verified" if action == "accept" else "rejected"):
+                    return True  # same state or skip: no-op
             item["status"] = action if action in ("verified", "rejected", "skipped") else item["status"]
             if action in ("accept", "reject"):
                 final = content if content not in (None, "") else item["content"]
@@ -136,6 +138,8 @@ def apply_action(doc, item_id, action, content=None):
                     payload["table_number"] = item.get("table_number")
                 target = VERIFIED_DIR if action == "accept" else REJECTED_DIR
                 (target / f"{item_id}.json").write_text(json.dumps(payload, indent=2))
+                stale = REJECTED_DIR if action == "accept" else VERIFIED_DIR
+                (stale / f"{item_id}.json").unlink(missing_ok=True)  # drop old copy on flip
                 item["status"] = "verified" if action == "accept" else "rejected"
                 if action == "accept" and content not in (None, ""):
                     item["content"] = content  # keep edited content as source of truth

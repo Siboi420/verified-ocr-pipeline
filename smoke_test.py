@@ -154,6 +154,22 @@ def main():
     check(next(i for i in pending["pages"][0]["items"] if i["id"] == table_id)["status"] == "verified",
           "pending doc marks item verified")
 
+    # finalized items can be flipped: verified -> rejected -> verified, copy moves
+    r = client.post(f"/item/{doc_id}/{table_id}/action", json={"action": "reject"})
+    check(r.status_code == 200, "flip verified->rejected 200")
+    pending = read_json(REPO / "validation" / "pending" / "smoke.json")
+    check(next(i for i in pending["pages"][0]["items"] if i["id"] == table_id)["status"] == "rejected",
+          "flip updates status to rejected")
+    check((REPO / "validation" / "rejected" / f"{table_id}.json").exists(),
+          "flip writes rejected copy")
+    check(not (REPO / "validation" / "verified" / f"{table_id}.json").exists(),
+          "flip removes stale verified copy")
+    r = client.post(f"/item/{doc_id}/{table_id}/action", json={"action": "accept"})
+    check(r.status_code == 200, "flip rejected->verified 200")
+    pending = read_json(REPO / "validation" / "pending" / "smoke.json")
+    check(next(i for i in pending["pages"][0]["items"] if i["id"] == table_id)["status"] == "verified",
+          "flip back restores verified")
+
     # reject equation -> rejected/
     eq_id = p1[0]["id"]
     r = client.post(f"/item/{doc_id}/{eq_id}/action", json={"action": "reject"})
@@ -173,6 +189,7 @@ def main():
                     json={"action": "accept", "content": text_payload})
     check(r.status_code == 200, "accept text item 200")
     tv = read_json(REPO / "validation" / "verified" / f"{text_id}.json")
+    # pi-lens-ignore: no-identity-operator-on-literals
     check(tv["content"] == "\n\nThis is the frame capacity prose.\n",
           "accepted text export drops # OCR:/CODE/**Commentary** lines")
     check(tv.get("section") == "5.3" and tv.get("source_name") == "smoke.pdf",
