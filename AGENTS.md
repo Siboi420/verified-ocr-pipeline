@@ -153,7 +153,9 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   gets a green border/tint, `.item.rejected` a red one (status is also in the meta text).
   Table items can be **consolidated**: the open editor has Merge cells / Split cell
   buttons — click two corners to select a rectangle (`.sel` highlight), Merge joins it
-  into one cell (`rowspan`/`colspan`, `.merged` tint), Split undoes it. The span map is
+  into one cell (any N×M rectangle; `rowspan`/`colspan`, `.merged` tint), Split undoes
+  it. **Add row** / **Add column** append an empty row at the bottom / column at the
+  right (append-only — existing span coordinates never shift). The span map is
   kept as `item.table_spans` (`[{r,c,rs,cs}]`, 0-indexed over the parsed grid) and
   posted with accept/edit; the exported pipe-markdown keeps the rectangular grid with
   covered cells empty (plain markdown has no span syntax — spans live in `table_spans`).
