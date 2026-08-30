@@ -128,6 +128,64 @@ def _item_order(it):
         return 0
 
 
+# Plain-text decoding for table cells: a small ACI-domain renderer so the
+# embedding sees query-matchable words instead of pipes + LaTeX (table chunks
+# have no provision statement to fold, so the raw content is all math).
+_LEGIBLE_MAP = {
+    "\\geq": ">=", "\\leq": "<=", "\\ne": "!=", "\\max": "max", "\\min": "min",
+}
+
+def _math_to_text(s):
+    """Decode a LaTeX-ish math cell to readable text, e.g.
+    "$$\\left[0.17\\lambda\\sqrt{f_{c}^{\\prime}}+\\frac{N_{u}}{6A_{g}}\\right]b_{w}d$$"
+    -> "[0.17 lambda sqrt(fc') + (Nu)/(6Ag)] bw d"."""
+    t = s.strip()
+    if not t:
+        return ""
+    t = t.replace("$$", "").replace("$", "")
+    # keep the bracket/paren that \left/\right point at
+    t = re.sub(r"\\left\s*(.)", r"\1", t)
+    t = re.sub(r"\\right\s*(.)", r"\1", t)
+    # \frac{X}{Y} -> (X)/(Y) — best-effort (nested braces in the numerator
+    # like N_{u} defeat the non-brace group; leftover frac keywords are
+    # dropped below and the tokens still carry the meaning)
+    t = re.sub(r"\\frac\s*\{([^{}]*)\}\s*\{([^{}]*)\}", r"(\1)/(\2)", t)
+    # \sqrt{X} -> sqrt(X)
+    t = re.sub(r"\\sqrt\s*\{([^{}]*)\}", r"sqrt(\1)", t)
+    # sub/superscripts BEFORE braces are flattened: A_{v} -> Av, f^{\prime} -> f'
+    t = re.sub(r"\\cdot", "*", t)
+    t = re.sub(r"\\prime", "'", t)
+    t = re.sub(r"\\frac", " ", t)  # leftover fracs drop the keyword
+    t = re.sub(r"[_^]\s*\{([^{}]*)\}", r"\1", t)
+    # symbol words
+    for k, v in _LEGIBLE_MAP.items():
+        t = t.replace(k, v)
+    t = t.replace("\\lambda", "lambda").replace("\\rho", "rho") \
+        .replace("\\phi", "phi").replace("\\mu", "mu") \
+        .replace("\\alpha", "alpha").replace("\\beta", "beta") \
+        .replace("\\times", "x")
+    # leftover braces/backslashes
+    t = t.replace("{", "").replace("}", "").replace("\\", "")
+    t = t.replace("^", "").replace("_", "")
+    t = re.sub(r"\s+", " ", t).strip()
+    return t
+
+
+def _table_prose(content):
+    """A one-line plain-text rendition of a pipe table's rows (for retrieval)."""
+    rows = []
+    for ln in content.splitlines():
+        line = ln.strip()
+        if not line.startswith("|"):
+            continue
+        cells = [c.strip() for c in line.strip("|").split("|")]
+        if not cells or set(cells) <= {"", "-", ":", ":-", "-:", "---"}:
+            continue  # separator row
+        dec = [_math_to_text(c) for c in cells]
+        rows.append(" : ".join(x for x in dec if x))
+    return " | ".join(rows)
+
+
 def render_markdown(items):
     """One markdown doc per source file. Empty content (boilerplate-only
     items are skipped) is skipped — nothing to index. Equations get
@@ -191,7 +249,14 @@ def render_markdown(items):
         # the table caption is the chunk's only plain-words surface (query-
         # matchable), so keep it above the pipe/LaTeX content
         cap_note = f"\n\n{it['caption']}" if it.get("type") == "table" and it.get("caption") else ""
-        body.append(f"{title}{header_note}{cap_note}\n\n{content}")
+        # plain-text rendition of the table's math so the embedding matches
+        # queries (the pipes/LaTeX alone carry almost no query words)
+        prose = ""
+        if it.get("type") == "table":
+            tc = _table_prose(content)
+            if tc:
+                prose = f"\n\n{tc}"
+        body.append(f"{title}{header_note}{cap_note}{prose}\n\n{content}")
     return header + "\n\n".join(body) + "\n"
 
 
@@ -278,8 +343,9 @@ def _selftest():
         # R-commentary has no key, so _stmt_key returns None for it
         assert _stmt_key("**R22.5.1.2** The limit on cross") is None
         md_b = render_markdown(by_doc["b"])
-        # table: no section -> backfilled from table_number; caption folded in
-        assert "## page 3 table — 4.1.1\n\nTable 4.1.1—Cap\n\n|x|y|" in md_b, md_b
+        # table: no section -> backfilled from table_number; caption folded in;
+        # plain-text prose rendition added (query-matchable words)
+        assert "## page 3 table — 4.1.1\n\nTable 4.1.1—Cap\n\nx : y\n\n|x|y|" in md_b, md_b
         assert "4.1.1" in md_b and "|x|y|" in md_b
     print("selftest: ok")
 

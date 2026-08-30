@@ -129,8 +129,11 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   statements stay unfolded — current ACI export: 43 eq chunks, 30 folded).
   Table chunks get the same treatment: caption folded in above the pipe/LaTeX
   content (the chunk's only plain-words, query-matchable surface — the
-  Table 22.5.5.1 retrieval miss was an uncaptioned table chunk) and section
-  backfilled from `table_number` (11 table chunks, 9 with a caption). Items
+  Table 22.5.5.1 retrieval miss was an uncaptioned table chunk), section
+  backfilled from `table_number`, AND a plain-text **prose rendition** of the
+  rows (`_table_prose`/`_math_to_text`: lambda/sqrt/rho/geq decoded,
+  subscripts flattened, frac best-effort — the LaTeX tokens alone still barely
+  match queries). (11 table chunks, all with prose.) Items
   order by the numeric index of `item_id` (lexical sort put i10
   before i2)
   and uploads to an Unsloth Studio RAG KB (`/api/rag/knowledge-bases`, name via
