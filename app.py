@@ -4,6 +4,7 @@ Single-user local tool (localhost:5000). Item-first review: tables and
 equations are the primary targets, page text is secondary.
 """
 import json
+import math
 import os
 import re
 import threading
@@ -14,7 +15,7 @@ from flask import Flask, abort, jsonify, redirect, render_template, request, sen
 
 import config
 from itemizer import clean_export_text, parse_document, parse_table_caption, pick_caption_from_band, unwrap_html_caption  # pyright: ignore[reportMissingImports] — same-dir module
-from ocr_engine import CAPTION_BAND_PROMPT, assemble_markdown, ocr_batch, ocr_page, parse_page_range, pdf_to_images, tesseract_ocr
+from ocr_engine import CAPTION_BAND_PROMPT, assemble_markdown, ocr_batch, ocr_page, parse_page_ranges, pdf_to_images, tesseract_ocr
 
 BASE = Path(__file__).resolve().parent
 VALIDATION = BASE / "validation"
@@ -60,6 +61,21 @@ def page_count(pdf_path):
 
     with pymupdf.open(pdf_path) as pdf:
         return len(pdf)
+
+
+def _parse_box(data):
+    """Parse {x, y, w, h} (fractions 0..1) from a JSON request body.
+
+    Raises ValueError for missing/non-numeric keys and non-finite values
+    (NaN/Inf — float() happily accepts them and they bypass range guards).
+    """
+    try:
+        box = {k: float(data[k]) for k in ("x", "y", "w", "h")}
+    except (KeyError, TypeError, ValueError) as e:
+        raise ValueError("x, y, w, h required (fractions of the page, 0..1)") from e
+    if not all(math.isfinite(v) for v in box.values()):
+        raise ValueError("x, y, w, h must be finite numbers")
+    return box
 
 
 def parse_and_persist(doc):
@@ -197,18 +213,18 @@ def upload():
     md_file = request.files.get("md")
     has_md = bool(md_file and md_file.filename and md_file.filename.endswith(".md"))
     pages_raw = request.form.get("ocr_pages", "").strip()
-    page_range = None
+    page_ranges = None
     if pages_raw:
-        page_range = parse_page_range(pages_raw)
-        if page_range is None:
-            abort(400, "invalid ocr_pages (use e.g. 5-15 or 5)")
+        page_ranges = parse_page_ranges(pages_raw)
+        if page_ranges is None:
+            abort(400, "invalid ocr_pages (use e.g. 5-15 or 2-3, 4-9)")
     if md_file is not None and has_md:
         md_file.save(str(md_path))
         parse_and_persist(doc)
     else:
         doc["pages"] = []
-        if page_range:
-            doc["ocr_pages"] = list(page_range)
+        if page_ranges:
+            doc["ocr_pages"] = [list(r) for r in page_ranges]
         save_doc(doc)
     # Native form submit -> redirect. AJAX fetch -> JSON.
     accept = request.headers.get("Accept", "")
@@ -236,9 +252,7 @@ def _run_ocr(job_id, doc):
         if not config.API_KEY:
             raise RuntimeError("UNSLOTH_API_KEY not set: set it to run GLM-OCR")
         pdf = Path(doc["pdf_path"])
-        ocr_pages = doc.get("ocr_pages")
-        page_range = tuple(ocr_pages) if isinstance(ocr_pages, (list, tuple)) and len(ocr_pages) == 2 else None
-        images, tmpdir = pdf_to_images(pdf, page_range=page_range)
+        images, tmpdir = pdf_to_images(pdf, page_range=doc.get("ocr_pages"))
         if not images:
             raise RuntimeError(
                 f"no pages match the OCR page range (PDF has {page_count(pdf)} pages)"
@@ -388,8 +402,8 @@ def bbox_ocr(doc_id):
     data = request.get_json(silent=True) or {}
     try:
         page = int(data.get("page", 1))
-        box = {k: float(data[k]) for k in ("x", "y", "w", "h")}
-    except (KeyError, TypeError, ValueError):
+        box = _parse_box(data)
+    except ValueError:
         abort(400, "page, x, y, w, h required (fractions of the page, 0..1)")
 
     try:
@@ -424,8 +438,8 @@ def item_caption(doc_id, item_id):
     data = request.get_json(silent=True) or {}
     try:
         page = int(data.get("page", 1))
-        box = {k: float(data[k]) for k in ("x", "y", "w", "h")}
-    except (KeyError, TypeError, ValueError):
+        box = _parse_box(data)
+    except ValueError:
         abort(400, "page, x, y, w, h required (fractions of the page, 0..1)")
     engine = data.get("engine", "glm")
     if engine not in ("glm", "tesseract"):

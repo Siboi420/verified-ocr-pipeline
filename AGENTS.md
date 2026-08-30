@@ -67,8 +67,8 @@ has its own AGENTS.md). This app is the human-review step feeding that research.
 ## Architecture / data flow
 
 ```
-Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="5-15"
-  page range for the initial OCR run) or /load (paths to pdf+md)
+Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3, 4-9"
+  page ranges for the initial OCR run) or /load (paths to pdf+md)
   -> GLM-OCR (Unsloth :8888) -> markdown -> itemizer.py -> review items
   -> human Accept/Edit/Reject/Skip
   -> validation/verified/ + validation/rejected/ (JSON per item)
@@ -79,10 +79,13 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="5-15
   live `done`/`total` page counts), `/doc/<id>` (review page),
   `/page/<doc_id>/<n>.png` (rendered, cached), `/item/.../action`, `/bulk`.
   Jobs are an **in-memory dict** — lost on restart. `upload()` validates `ocr_pages`
-  (`N` or `N-M`, 1-indexed; invalid -> 400) and stores `doc["ocr_pages"] = [start, end]`
-  only in the no-markdown branch (md uploads ignore the field). `_run_ocr` reads the
-  stored range, clamps to the PDF (`pdf_to_images`), errors clearly if zero pages
-  match, and pushes `done`/`total` into the job dict via `ocr_batch(on_progress=...)`.
+  (`N`, `N-M`, or comma-separated like `2-3, 4-9`, 1-indexed; invalid -> 400) and
+  stores `doc["ocr_pages"]` as a list of `[start, end]` pairs (e.g. `[[2,3],[4,9]]`;
+  legacy flat `[5,10]` still accepted) only in the no-markdown branch (md uploads
+  ignore the field). `_run_ocr` passes the stored value straight to `pdf_to_images`
+  (clamps, merges), errors clearly if zero pages match, and pushes `done`/`total`
+  into the job dict via `ocr_batch(on_progress=...)`. bbox/caption routes parse box
+  coords through `_parse_box`, rejecting non-finite (NaN/Inf) values with 400.
 - `rag_uploader.py` — reads `validation/verified/*.json`, groups items by
   `doc_id`, renders one markdown file per source doc (`source_name` header, per-item
   `## page N <type> — <section>` titles, section is the full dotted heading)
@@ -93,8 +96,11 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="5-15
   `--dry-run` to render without uploading. Requires `UNSLOTH_API_KEY`.
 - `config.py` — `API_BASE` (default `http://localhost:8888`), `API_KEY` (env-only),
   `MODEL = "ggml-org/GLM-OCR-GGUF"`, `UPLOAD_DIR`.
-- `ocr_engine.py` — `pdf_to_images(dpi=200, page_range=None)`, `parse_page_range(s)`
-  (`"N"`/`"N-M"` -> tuple or `None`; shared by the CLI `--pages` arg and the app),
+- `ocr_engine.py` — `pdf_to_images(dpi=200, page_range=None)` (accepts a single
+  `(s, e)` or a list of `(s, e)` pairs; clamped to the PDF, overlaps merged),
+  `parse_page_range(s)` (`"N"`/`"N-M"` -> tuple or `None`) and `parse_page_ranges(s)`
+  (comma-separated `2-3, 4-9` -> list of tuples or `None`; used by the app upload,
+  CLI `--pages` uses the single-range form),
   `ocr_page`/`ocr_batch(workers=2, on_progress=None)` (`on_progress(done, total)`
   fires after each completed page), `assemble_markdown`. Timeouts were raised to
   600s (GLM-OCR f16-on-CPU read timed out at 120s; now GPU so fine). Payload is
@@ -128,9 +134,10 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="5-15
 - Timeouts in `ocr_engine.py` are 600s.
 - Itemizer handles **HTML tables** (GLM-OCR sometimes emits HTML instead of markdown).
 - Auto-OCR on PDF-only upload works (blue bar, polls, reloads, `?ocr=1`).
-- Upload accepts an optional `ocr_pages` page range; stored on the pending doc JSON
-  (`[start, end]`) and honored by the initial OCR run only (re-OCR of extra pages
-  is out of scope). Invalid values return 400.
+- Upload accepts an optional `ocr_pages` range — single (`5`, `1-3`) or
+  comma-separated (`2-3, 4-9`); stored on the pending doc JSON as a list of
+  `[start, end]` pairs and honored by the initial OCR run only (re-OCR of extra
+  pages out of scope). Invalid values return 400.
 - OCR jobs report live `done`/`total` page counts, surfaced in the auto-OCR bar,
   the upload status line, and the review-page "OCR'd X/Y pages" line.
 - `testOCR` doc: page 1 cost table (HTML→markdown) + page 3 pipe table both recognized.
@@ -157,9 +164,10 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="5-15
 ## Tests / verification
 
 - `python3 test_itemizer.py` — 61 itemizer assertions.
-- `python3 smoke_test.py` — 63 end-to-end checks via Flask test client (no live OCR;
-  asserts `?ocr=1` redirect, no-key OCR error, `parse_page_range` valid/invalid
-  forms, `ocr_pages` stored on pending JSON, invalid range -> 400, md-wins-over-range).
+- `python3 smoke_test.py` — 73 end-to-end checks via Flask test client (no live OCR;
+  asserts `?ocr=1` redirect, no-key OCR error, `parse_page_range`/`parse_page_ranges`
+  valid+invalid forms, `ocr_pages` storage incl. multiple ranges, invalid -> 400,
+  md-wins-over-range, NaN bbox coords rejected).
 - A quick GPU/alive check: `curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:5000/`
   (app) and `:8888` (unsloth); `nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader`
   should show >0% during OCR.

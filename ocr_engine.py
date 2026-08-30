@@ -78,18 +78,47 @@ def parse_page_range(s):
     return start, end
 
 
+def parse_page_ranges(s):
+    """Parse comma-separated ranges "2-3, 4-9" -> [(2,3),(4,9)]; invalid -> None.
+
+    Each chunk is a single range per parse_page_range ("N" or "N-M"); a
+    blank/whitespace-only input yields None. Overlapping chunks are merged in
+    pdf_to_images.
+    """
+    s = (s or "").strip()
+    if not s:
+        return None
+    ranges = []
+    for chunk in s.split(","):
+        pr = parse_page_range(chunk)
+        if pr is None:
+            return None
+        ranges.append(pr)
+    return ranges
+
+
 # ── PDF → Images ────────────────────────────────────────────────────────────
 
 def pdf_to_images(pdf_path, dpi=200, page_range=None):
-    """Convert PDF pages to PNGs via PyMuPDF. Returns (images, tmpdir)."""
+    """Convert PDF pages to PNGs via PyMuPDF. Returns (images, tmpdir).
+
+    page_range: "N"-style single (start, end) tuple/list, or a list of
+    (start, end) pairs covering multiple disjoint ranges ("2-3, 4-9").
+    Out-of-range ends are clamped to the PDF length; overlaps are merged.
+    """
     import pymupdf
 
     doc = pymupdf.open(pdf_path)
     total = len(doc)
 
     if page_range:
-        start, end = page_range
-        pages = range(max(1, start), min(total, end) + 1)
+        if isinstance(page_range[0], int):  # single flat (s, e) or [s, e]
+            ranges = [tuple(page_range)]
+        else:  # list of (start, end) pairs
+            ranges = [tuple(r) for r in page_range]
+        pages = sorted({
+            p for s, e in ranges for p in range(max(1, s), min(total, e) + 1)
+        })
     else:
         pages = range(1, total + 1)
 

@@ -71,6 +71,12 @@ def main():
     check(ocr.parse_page_range("0-2") is None, "parse_page_range '0-2' -> None (start<1)")
     check(ocr.parse_page_range("3-1") is None, "parse_page_range '3-1' -> None (end<start)")
     check(ocr.parse_page_range("1-") is None, "parse_page_range '1-' -> None (dangling dash)")
+    check(ocr.parse_page_ranges("2-3, 4-9") == [(2, 3), (4, 9)],
+          "parse_page_ranges '2-3, 4-9' -> [(2,3),(4,9)]")
+    check(ocr.parse_page_ranges("5") == [(5, 5)], "parse_page_ranges '5' -> [(5,5)]")
+    check(ocr.parse_page_ranges("") is None, "parse_page_ranges '' -> None")
+    check(ocr.parse_page_ranges("2-3,x") is None, "parse_page_ranges bad chunk -> None")
+    check(ocr.parse_page_ranges("3-1") is None, "parse_page_ranges reversed -> None")
     # Fixture PDF (2 pages) so page_count and page PNG work.
     pdf_dir = REPO / "validation" / "uploads" / "smoke"
     pdf_dir.mkdir(parents=True, exist_ok=True)
@@ -185,6 +191,8 @@ def main():
     # bbox route input validation (no live OCR call)
     r = client.post(f"/bbox_ocr/{doc_id}", json={"page": 1})
     check(r.status_code == 400, "bbox OCR rejects missing coords")
+    r = client.post(f"/bbox_ocr/{doc_id}", json={"page": 1, "x": "nan", "y": 0, "w": .5, "h": .5})
+    check(r.status_code == 400, "bbox OCR rejects NaN coords")
     r = client.post(f"/bbox_ocr/{doc_id}", json={"page": 99, "x": 0, "y": 0, "w": .5, "h": .5})
     check(r.status_code == 404, "bbox OCR rejects out-of-range page")
 
@@ -222,8 +230,23 @@ def main():
     rng = r.get_json()
     check(rng["doc_id"] == "range", "range upload doc_id = range")
     rg_doc = read_json(REPO / "validation" / "pending" / "range.json")
-    check(rg_doc.get("ocr_pages") == [1, 2], "ocr_pages stored as [1,2]")
+    check(rg_doc.get("ocr_pages") == [[1, 2]], "ocr_pages stored as [[1,2]]")
     check(rg_doc.get("pages") == [], "range doc starts with no items")
+
+    # multiple comma-separated ranges -> stored as a list of [start, end] pairs
+    r = client.post("/upload", data={"pdf": (io.BytesIO(pdf_bytes), "multi.pdf"),
+                                     "ocr_pages": "2-3, 4-9"})
+    check(r.status_code == 200, "upload multi-range 200")
+    multi_doc = read_json(REPO / "validation" / "pending" / "multi.json")
+    check(multi_doc.get("ocr_pages") == [[2, 3], [4, 9]],
+          "multi-range stored as [[2,3],[4,9]]")
+    client.post("/doc/multi/discard")
+
+    # pdf_to_images accepts a list of ranges (merged, clamped to the PDF)
+    imgs, _ = appmod.pdf_to_images(str(pdf_path), page_range=[[1, 1], [2, 2]])
+    check([n for n, _ in imgs] == [1, 2], "pdf_to_images merges multiple ranges")
+    imgs, _ = appmod.pdf_to_images(str(pdf_path), page_range=[[2, 2]])
+    check([n for n, _ in imgs] == [2], "pdf_to_images nested single range")
 
     # invalid ocr_pages -> 400, nothing stored
     r = client.post("/upload", data={"pdf": (io.BytesIO(pdf_bytes), "range.pdf"),
@@ -233,7 +256,7 @@ def main():
                                      "ocr_pages": "abc"})
     check(r.status_code == 400, "non-numeric ocr_pages -> 400")
     rg_doc = read_json(REPO / "validation" / "pending" / "range.json")
-    check(rg_doc.get("ocr_pages") == [1, 2], "failed uploads leave stored range intact")
+    check(rg_doc.get("ocr_pages") == [[1, 2]], "failed uploads leave stored range intact")
 
     # markdown + ocr_pages -> markdown wins, range not stored
     r = client.post("/upload", data={"pdf": (io.BytesIO(pdf_bytes), "range.pdf"),

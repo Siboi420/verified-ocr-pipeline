@@ -95,8 +95,8 @@ window.MathJax = {tex: {inlineMath: [["\\(", "\\)"], ["$", "$"]]}};
     <input type="file" name="pdf" accept=".pdf" required>
     <input type="file" name="md" accept=".md,.txt" title="optional: already-OCRed markdown">
     <label class="muted">pages
-      <input type="text" name="ocr_pages" placeholder="1-10 (blank = all)" size="10"
-             title="1-indexed page range for the initial OCR (ignored when markdown is uploaded)">
+      <input type="text" name="ocr_pages" placeholder="2-3, 4-9 (blank = all)" size="14"
+             title="1-indexed page ranges for the initial OCR, comma-separated (e.g. 2-3, 4-9; ignored when markdown is uploaded)">
     </label>
     <button type="submit">Upload</button>
     <span class="muted" id="upStatus"></span>
