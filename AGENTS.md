@@ -41,12 +41,18 @@ has its own AGENTS.md). This app is the human-review step feeding that research.
 ## Services / runtime (how it actually runs)
 
 - **Flask app**: `python3 app.py` → `http://127.0.0.1:5000`, single-user local tool.
-  Requires `UNSLOTH_API_KEY` env var (no hardcoded fallback). **A hermes-agent
-  supervisor respawns the app** — it will auto-restart if killed; use `pkill -f
-  "python3 app.py"` and confirm with a fresh `curl`, or restart manually:
+  Requires `UNSLOTH_API_KEY` env var (no hardcoded fallback; the key lives in
+  `.env.local`, gitignored — this AGENTS.md is git-tracked and pushed to GitHub,
+  so the key must never go in here). There is **no auto-restart supervisor** — if
+  the app is down, restart it in TWO separate shell commands:
   ```bash
-  cd ~/Projects/seismic-ai-tools && nohup env UNSLOTH_API_KEY="<key>" python3 app.py > /tmp/seismic-app.log 2>&1 &
+  pkill -f "python3 app\.py" || true                      # kill
+  cd ~/Projects/seismic-ai-tools && set -a; . ./.env.local; set +a; nohup python3 app.py > /tmp/seismic-app.log 2>&1 &   # start
   ```
+  **Foot-gun (verified):** `pkill -f "python3 app.py"` matches its own command
+  line, so kill + start in ONE shell command kills the shell before the start runs.
+  Use two separate invocations, and escape the dot (`app\.py`) so the pattern
+  doesn't match the pkill argument itself.
 - **Unsloth Studio**: `http://127.0.0.1:8888`, serves the GLM-OCR model via OpenAI-style
   `/v1/chat/completions`. Auth via `Authorization: Bearer <UNSLOTH_API_KEY>`.
   - Model: `ggml-org/GLM-OCR-GGUF` (Q8_0 as of last swap). Loaded via:
@@ -61,16 +67,22 @@ has its own AGENTS.md). This app is the human-review step feeding that research.
 ## Architecture / data flow
 
 ```
-Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1) or /load (paths to pdf+md)
+Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="5-15"
+  page range for the initial OCR run) or /load (paths to pdf+md)
   -> GLM-OCR (Unsloth :8888) -> markdown -> itemizer.py -> review items
   -> human Accept/Edit/Reject/Skip
   -> validation/verified/ + validation/rejected/ (JSON per item)
 ```
 
-- `app.py` — Flask routes: `/`, `/load` (paths), `/upload` (multipart, optional md),
-  `/ocr/<doc_id>` (async job), `/jobs/<id>` (poll), `/doc/<id>` (review page),
+- `app.py` — Flask routes: `/`, `/load` (paths), `/upload` (multipart, optional md,
+  optional `ocr_pages` form field), `/ocr/<doc_id>` (async job), `/jobs/<id>` (poll,
+  live `done`/`total` page counts), `/doc/<id>` (review page),
   `/page/<doc_id>/<n>.png` (rendered, cached), `/item/.../action`, `/bulk`.
-  Jobs are an **in-memory dict** — lost on restart.
+  Jobs are an **in-memory dict** — lost on restart. `upload()` validates `ocr_pages`
+  (`N` or `N-M`, 1-indexed; invalid -> 400) and stores `doc["ocr_pages"] = [start, end]`
+  only in the no-markdown branch (md uploads ignore the field). `_run_ocr` reads the
+  stored range, clamps to the PDF (`pdf_to_images`), errors clearly if zero pages
+  match, and pushes `done`/`total` into the job dict via `ocr_batch(on_progress=...)`.
 - `rag_uploader.py` — reads `validation/verified/*.json`, groups items by
   `doc_id`, renders one markdown file per source doc (`source_name` header, per-item
   `## page N <type> — <section>` titles, section is the full dotted heading)
@@ -81,9 +93,12 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1) or /load (paths to pdf+m
   `--dry-run` to render without uploading. Requires `UNSLOTH_API_KEY`.
 - `config.py` — `API_BASE` (default `http://localhost:8888`), `API_KEY` (env-only),
   `MODEL = "ggml-org/GLM-OCR-GGUF"`, `UPLOAD_DIR`.
-- `ocr_engine.py` — `pdf_to_images(dpi=200)`, `ocr_page`/`ocr_batch(workers=2)`,
-  `assemble_markdown`. Timeouts were raised to 600s (GLM-OCR f16-on-CPU read timed out
-  at 120s; now GPU so fine). Payload is non-streaming chat completions — see note below.
+- `ocr_engine.py` — `pdf_to_images(dpi=200, page_range=None)`, `parse_page_range(s)`
+  (`"N"`/`"N-M"` -> tuple or `None`; shared by the CLI `--pages` arg and the app),
+  `ocr_page`/`ocr_batch(workers=2, on_progress=None)` (`on_progress(done, total)`
+  fires after each completed page), `assemble_markdown`. Timeouts were raised to
+  600s (GLM-OCR f16-on-CPU read timed out at 120s; now GPU so fine). Payload is
+  non-streaming chat completions — see note below.
 - `itemizer.py` — splits markdown on `--- Page N ---`, extracts equations
   (`$$...$$` / `\[...\]`), **pipe tables and HTML `<table>...</table>`** (added to fix
   GLM-OCR answering HTML tables; HTML converted to `|...|` markdown), inline math
@@ -94,9 +109,17 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1) or /load (paths to pdf+m
   standalone CODE/COMMENTARY markers — applied **at export only** (verified JSON,
   not the review UI/doc).
 - `templates/index.html` — single-page JS UI. Has an `autoOcr()` + `?ocr=1` gate
-  (upload PDF-only → auto-starts OCR). `post()`, `pollJob()` helpers. **Note:**
-  `location.reload()` refreshes DOC after OCR job completes (deliberate; the old
-  inline `const DOC = ([^;]+);` regex broke on `;` in content).
+  (upload PDF-only → auto-starts OCR). Upload form has an optional `ocr_pages` text
+  input. `post()`, `pollJob(jobId, done, progress)` helpers (progress callback
+  updates the line while running). Auto-OCR bar and upload status show live
+  `D/T pages`. Header shows an "OCR'd X/Y pages" coverage line (pages with ≥1 item
+  over `n_pages`), set by `render()`, which is now also called once on doc-page
+  load (the page selector/items previously only rendered after a user interaction).
+  The item counter always reflects the current page — pages with no items (e.g.
+  outside the OCR page range) show "no items on page N", never a stale count from
+  a previously-viewed page.
+  **Note:** `location.reload()` refreshes DOC after OCR job completes (deliberate;
+  the old inline `const DOC = ([^;]+);` regex broke on `;` in content).
 - `validation/` — `pending/` (docs), `verified/`, `rejected/` (per-item JSON), `uploads/<doc_id>/` (pdf, md, page PNGs).
 
 ## Current state (verified facts — don't contradict)
@@ -105,6 +128,11 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1) or /load (paths to pdf+m
 - Timeouts in `ocr_engine.py` are 600s.
 - Itemizer handles **HTML tables** (GLM-OCR sometimes emits HTML instead of markdown).
 - Auto-OCR on PDF-only upload works (blue bar, polls, reloads, `?ocr=1`).
+- Upload accepts an optional `ocr_pages` page range; stored on the pending doc JSON
+  (`[start, end]`) and honored by the initial OCR run only (re-OCR of extra pages
+  is out of scope). Invalid values return 400.
+- OCR jobs report live `done`/`total` page counts, surfaced in the auto-OCR bar,
+  the upload status line, and the review-page "OCR'd X/Y pages" line.
 - `testOCR` doc: page 1 cost table (HTML→markdown) + page 3 pipe table both recognized.
   **Open question:** user reports page 1 may contain a 2nd table visually that GLM-OCR
   doesn't extract; investigation was in progress (GLM-OCR directed at page 1 returns only
@@ -123,15 +151,15 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1) or /load (paths to pdf+m
 - **WSL GPU**: `/dev/dxg` is the paravirtualized path; `nvidia-smi` works via
   `/usr/lib/wsl/lib/nvidia-smi`. Unsloth's `POST /api/llama/backend` is the supported
   way to change llama.cpp build (cpu/cuda/rocm/vulkan).
-- Do not paste the API key into code; it lives in env (and in the hermes supervisor's
-  launch command line).
+- Do not paste the API key into code; it lives in `.env.local` (gitignored) and env only.
 - Do not fabricate results; verify against actual tool output (tests, curl, logs).
 
 ## Tests / verification
 
 - `python3 test_itemizer.py` — 61 itemizer assertions.
-- `python3 smoke_test.py` — 46 end-to-end checks via Flask test client (no live OCR;
-  asserts `?ocr=1` redirect, no-key OCR error, etc.).
+- `python3 smoke_test.py` — 63 end-to-end checks via Flask test client (no live OCR;
+  asserts `?ocr=1` redirect, no-key OCR error, `parse_page_range` valid/invalid
+  forms, `ocr_pages` stored on pending JSON, invalid range -> 400, md-wins-over-range).
 - A quick GPU/alive check: `curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:5000/`
   (app) and `:8888` (unsloth); `nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader`
   should show >0% during OCR.

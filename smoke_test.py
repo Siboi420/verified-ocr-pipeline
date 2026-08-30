@@ -60,6 +60,17 @@ def read_json(path):
 
 
 def main():
+    # parse_page_range: valid single/range/whitespace, invalid forms
+    import ocr_engine as ocr
+
+    check(ocr.parse_page_range("5") == (5, 5), "parse_page_range '5' -> (5,5)")
+    check(ocr.parse_page_range("1-3") == (1, 3), "parse_page_range '1-3' -> (1,3)")
+    check(ocr.parse_page_range(" 2-4 ") == (2, 4), "parse_page_range strips whitespace")
+    check(ocr.parse_page_range("") is None, "parse_page_range '' -> None")
+    check(ocr.parse_page_range("x") is None, "parse_page_range 'x' -> None")
+    check(ocr.parse_page_range("0-2") is None, "parse_page_range '0-2' -> None (start<1)")
+    check(ocr.parse_page_range("3-1") is None, "parse_page_range '3-1' -> None (end<start)")
+    check(ocr.parse_page_range("1-") is None, "parse_page_range '1-' -> None (dangling dash)")
     # Fixture PDF (2 pages) so page_count and page PNG work.
     pdf_dir = REPO / "validation" / "uploads" / "smoke"
     pdf_dir.mkdir(parents=True, exist_ok=True)
@@ -203,6 +214,37 @@ def main():
     check(r.status_code == 200, "upload 200")
     up = r.get_json()
     check(up["doc_id"] == "smoke" and up["ocr_needed"], "upload without md -> ocr_needed")
+
+    # upload with an ocr_pages range -> stored on the pending doc JSON
+    r = client.post("/upload", data={"pdf": (io.BytesIO(pdf_bytes), "range.pdf"),
+                                     "ocr_pages": "1-2"})
+    check(r.status_code == 200, "upload range.pdf 200")
+    rng = r.get_json()
+    check(rng["doc_id"] == "range", "range upload doc_id = range")
+    rg_doc = read_json(REPO / "validation" / "pending" / "range.json")
+    check(rg_doc.get("ocr_pages") == [1, 2], "ocr_pages stored as [1,2]")
+    check(rg_doc.get("pages") == [], "range doc starts with no items")
+
+    # invalid ocr_pages -> 400, nothing stored
+    r = client.post("/upload", data={"pdf": (io.BytesIO(pdf_bytes), "range.pdf"),
+                                     "ocr_pages": "3-1"})
+    check(r.status_code == 400, "invalid ocr_pages -> 400")
+    r = client.post("/upload", data={"pdf": (io.BytesIO(pdf_bytes), "range.pdf"),
+                                     "ocr_pages": "abc"})
+    check(r.status_code == 400, "non-numeric ocr_pages -> 400")
+    rg_doc = read_json(REPO / "validation" / "pending" / "range.json")
+    check(rg_doc.get("ocr_pages") == [1, 2], "failed uploads leave stored range intact")
+
+    # markdown + ocr_pages -> markdown wins, range not stored
+    r = client.post("/upload", data={"pdf": (io.BytesIO(pdf_bytes), "range.pdf"),
+                                     "md": (io.BytesIO(MARKDOWN.encode()), "range.md"),
+                                     "ocr_pages": "1"})
+    check(r.status_code == 200 and not r.get_json()["ocr_needed"],
+          "upload with md + ocr_pages -> no ocr needed")
+    rg_doc = read_json(REPO / "validation" / "pending" / "range.json")
+    check("ocr_pages" not in rg_doc, "md upload does not store ocr_pages")
+    client.post(f"/doc/{rng['doc_id']}/discard")
+
     r = client.post(f"/ocr/{up['doc_id']}")
     check(r.status_code == 200, "/ocr returns immediately")
     job_id = r.get_json()["job_id"]

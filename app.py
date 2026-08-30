@@ -14,7 +14,7 @@ from flask import Flask, abort, jsonify, redirect, render_template, request, sen
 
 import config
 from itemizer import clean_export_text, parse_document, parse_table_caption, pick_caption_from_band, unwrap_html_caption  # pyright: ignore[reportMissingImports] — same-dir module
-from ocr_engine import CAPTION_BAND_PROMPT, assemble_markdown, ocr_batch, ocr_page, pdf_to_images, tesseract_ocr
+from ocr_engine import CAPTION_BAND_PROMPT, assemble_markdown, ocr_batch, ocr_page, parse_page_range, pdf_to_images, tesseract_ocr
 
 BASE = Path(__file__).resolve().parent
 VALIDATION = BASE / "validation"
@@ -196,11 +196,19 @@ def upload():
     }
     md_file = request.files.get("md")
     has_md = bool(md_file and md_file.filename and md_file.filename.endswith(".md"))
+    pages_raw = request.form.get("ocr_pages", "").strip()
+    page_range = None
+    if pages_raw:
+        page_range = parse_page_range(pages_raw)
+        if page_range is None:
+            abort(400, "invalid ocr_pages (use e.g. 5-15 or 5)")
     if md_file is not None and has_md:
         md_file.save(str(md_path))
         parse_and_persist(doc)
     else:
         doc["pages"] = []
+        if page_range:
+            doc["ocr_pages"] = list(page_range)
         save_doc(doc)
     # Native form submit -> redirect. AJAX fetch -> JSON.
     accept = request.headers.get("Accept", "")
@@ -218,7 +226,7 @@ def start_ocr(doc_id):
     if doc.get("pages"):
         abort(400, "document already has parsed markdown")
     job_id = uuid.uuid4().hex[:12]
-    JOBS[job_id] = {"status": "running"}
+    JOBS[job_id] = {"status": "running", "done": 0, "total": 0}
     threading.Thread(target=_run_ocr, args=(job_id, doc), daemon=True).start()
     return jsonify({"job_id": job_id})
 
@@ -228,9 +236,21 @@ def _run_ocr(job_id, doc):
         if not config.API_KEY:
             raise RuntimeError("UNSLOTH_API_KEY not set: set it to run GLM-OCR")
         pdf = Path(doc["pdf_path"])
-        images, tmpdir = pdf_to_images(pdf)
+        ocr_pages = doc.get("ocr_pages")
+        page_range = tuple(ocr_pages) if isinstance(ocr_pages, (list, tuple)) and len(ocr_pages) == 2 else None
+        images, tmpdir = pdf_to_images(pdf, page_range=page_range)
+        if not images:
+            raise RuntimeError(
+                f"no pages match the OCR page range (PDF has {page_count(pdf)} pages)"
+            )
+        JOBS[job_id]["total"] = len(images)
         try:
-            results = ocr_batch(images, workers=2)
+            results = ocr_batch(
+                images, workers=2,
+                on_progress=lambda done, total: JOBS[job_id].update(
+                    done=done, total=total
+                ),
+            )
         finally:
             for _, img in images:
                 try:

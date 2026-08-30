@@ -14,6 +14,7 @@ Usage:
 import argparse
 import base64
 import os
+import re
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -54,6 +55,27 @@ def encode_image(image_path):
     }.get(ext, "image/png")
     b64 = base64.b64encode(data).decode("utf-8")
     return f"data:{mime};base64,{b64}"
+
+
+# ── Page ranges ─────────────────────────────────────────────────────────────
+
+def parse_page_range(s):
+    """Parse "N" -> (N, N) or "N-M" -> (N, M); invalid -> None.
+
+    1-indexed, inclusive. Rejects empty, non-numeric, start < 1, end < start.
+    """
+    s = (s or "").strip()
+    m = re.fullmatch(r"(\d+)(?:-(\d+))?", s)
+    if not m:
+        return None
+    a, b = m.groups()
+    try:
+        start, end = int(a), int(b or a)
+    except ValueError:  # unreachable: groups are fullmatch \d+; defensive
+        return None
+    if start < 1 or end < start:
+        return None
+    return start, end
 
 
 # ── PDF → Images ────────────────────────────────────────────────────────────
@@ -199,13 +221,16 @@ def ocr_page(image_path, page_num=None, max_tokens=4096, prompt=OCR_PROMPT):
 
 # ── Batch OCR ────────────────────────────────────────────────────────────────
 
-def ocr_batch(images, workers=2, max_tokens_per_page=4096):
+def ocr_batch(images, workers=2, max_tokens_per_page=4096, on_progress=None):
     """
     OCR multiple pages concurrently.
     images: list of (page_num, image_path)
+    on_progress: optional callable(done, total), called after each page completes.
     Returns list of result dicts in page order.
     """
     results = []
+    total = len(images)
+    done = 0
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {
             pool.submit(ocr_page, path, num, max_tokens_per_page): num
@@ -213,6 +238,9 @@ def ocr_batch(images, workers=2, max_tokens_per_page=4096):
         }
         for future in as_completed(futures):
             results.append(future.result())
+            done += 1
+            if on_progress:
+                on_progress(done, total)
 
     results.sort(key=lambda r: r["page"] if r["page"] else 0)
     return results
@@ -265,13 +293,11 @@ def main():
         print(f"Converting PDF: {input_path}  (dpi={args.dpi})")
         page_range = None
         if args.pages:
-            try:
-                parts = args.pages.split("-")
-                page_range = (int(parts[0]), int(parts[1]))
-            except (ValueError, IndexError):
+            page_range = parse_page_range(args.pages)
+            if page_range is None:
                 print("Error: invalid page range (use e.g. 5-15)", file=sys.stderr)
                 sys.exit(1)
-            print(f"  Pages: {parts[0]}-{parts[1]}")
+            print(f"  Pages: {page_range[0]}-{page_range[1]}")
 
         images, tmpdir = pdf_to_images(input_path, dpi=args.dpi, page_range=page_range)
         print(f"  {len(images)} pages to process")

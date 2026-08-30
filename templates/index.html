@@ -53,7 +53,8 @@ window.MathJax = {tex: {inlineMath: [["\\(", "\\)"], ["$", "$"]]}};
 <header>
   <h1>OCR Validation</h1>
   {% if doc %}<span class="pill">{{ doc.source_name }}</span>
-  <span class="muted" id="counter"></span>{% endif %}
+  <span class="muted" id="counter"></span>
+  <span class="muted" id="ocrCoverage"></span>{% endif %}
 </header>
 
 {% if doc %}
@@ -93,6 +94,10 @@ window.MathJax = {tex: {inlineMath: [["\\(", "\\)"], ["$", "$"]]}};
   <form id="upForm" class="row" method="post" enctype="multipart/form-data" action="/upload">
     <input type="file" name="pdf" accept=".pdf" required>
     <input type="file" name="md" accept=".md,.txt" title="optional: already-OCRed markdown">
+    <label class="muted">pages
+      <input type="text" name="ocr_pages" placeholder="1-10 (blank = all)" size="10"
+             title="1-indexed page range for the initial OCR (ignored when markdown is uploaded)">
+    </label>
     <button type="submit">Upload</button>
     <span class="muted" id="upStatus"></span>
   </form>
@@ -134,7 +139,9 @@ const autoOcr = async () => {
     bar.style.display = "block";
     bar.textContent = "OCR in progress…";
     const {job_id} = await post(`/ocr/${DOC.doc_id}`);
-    await pollJob(job_id, () => location.reload());
+    await pollJob(job_id, () => location.reload(), st => {
+      bar.textContent = `OCR in progress… ${st.done}/${st.total} pages`;
+    });
   } catch (e) {
     bar.textContent = "OCR failed: " + e.message;
   }
@@ -342,7 +349,10 @@ function closeEditor(el) {
 function updateCounter() {
   const pages = DOC.pages || [];
   const pg = pages.find(p => p.page === pageNo);
-  if (!pg) { document.getElementById("counter").textContent = ""; return; }
+  if (!pg) {
+    document.getElementById("counter").textContent = `no items on page ${pageNo}`;
+    return;
+  }
   const idx = pg.items.findIndex(i => i.id === cursorId);
   const x = idx >= 0 ? idx + 1 : 0;
   document.getElementById("counter").textContent =
@@ -351,6 +361,9 @@ function updateCounter() {
 
 function render() {
   const pages = DOC.pages || [];
+  const covered = pages.filter(p => (p.items || []).length > 0).length;
+  document.getElementById("ocrCoverage").textContent =
+    `OCR'd ${covered}/${DOC.n_pages} pages`;
   const sel = document.getElementById("pageSel");
   sel.innerHTML = "";
   for (let n = 1; n <= DOC.n_pages; n++) {
@@ -371,6 +384,7 @@ function render() {
   box.innerHTML = "";
   if (!pg || !pg.items.length) {
     box.innerHTML = '<div class="muted">No items on this page.</div>';
+    updateCounter();
     return;
   }
   for (const it of pg.items) {
@@ -575,6 +589,7 @@ document.getElementById("discardBtn").addEventListener("click", async () => {
     location.assign("/");
   } catch (e) { alert("Discard failed: " + e.message); }
 });
+render();
 }
 
 /* ---------- OCR (upload without markdown) ---------- */
@@ -583,11 +598,14 @@ function safeDocUrl(docId) {
   return `/doc/${docId}`;
 }
 
-async function pollJob(jobId, done) {
+async function pollJob(jobId, done, progress) {
   const st = await (await fetch(`/jobs/${jobId}`)).json();
   if (st.status === "done") done();
   else if (st.status === "error") throw new Error(st.error || "OCR job failed");
-  else setTimeout(() => pollJob(jobId, done), 2000);
+  else {
+    if (progress) progress(st);
+    setTimeout(() => pollJob(jobId, done, progress), 2000);
+  }
 }
 
 /* ---------- discard scanned documents from the list ---------- */
@@ -621,7 +639,9 @@ document.addEventListener("click", async e => {
       if (!ocr_needed) { location.assign(safeDocUrl(doc_id)); return; }
       st.textContent = "OCR running…";
       const {job_id} = await post(`/ocr/${doc_id}`);
-      await pollJob(job_id, () => { location.assign(safeDocUrl(doc_id)); });
+      await pollJob(job_id, () => { location.assign(safeDocUrl(doc_id)); }, job => {
+        st.textContent = `OCR running… ${job.done}/${job.total} pages`;
+      });
     } catch (err) {
       st.textContent = "upload failed: " + err.message;
     }
