@@ -307,42 +307,39 @@ function tableToMarkdown(el) {
 }
 
 function initMergeSel(ed) {
-  const table = ed.querySelector("table.grid");
-  if (!table) return;
-  ed._sel = null;
-  table.addEventListener("click", e => {
+  ed.tabSel = new Set();          // selected cells as "r,c"
+  // delegated on the editor container (persists across grid re-renders)
+  ed.addEventListener("click", e => {
     const td = e.target.closest("td");
     if (!td) return;
     const r = +td.closest("tr").dataset.r, c = +td.dataset.c;
-    const s = ed._sel;
-    if (s && s.r2 === undefined) ed._sel = {r1: s.r1, c1: s.c1, r2: r, c2: c}; // 2nd corner
-    else ed._sel = {r1: r, c1: c, r2: undefined};                            // anchor / reset
+    const key = r + "," + c;
+    if (e.shiftKey) {
+      if (ed.tabSel.has(key)) ed.tabSel.delete(key);  // shift+click: deselect
+      else ed.tabSel.add(key);                        // shift+click: select
+    } else {
+      ed.tabSel.clear(); ed.tabSel.add(key);          // plain click: select only this
+    }
     paintSel(ed);
   });
 }
 
 function paintSel(ed) {
   const table = ed.querySelector("table.grid");
-  [...table.querySelectorAll("td")].forEach(td => td.classList.remove("sel"));
-  const s = ed._sel;
-  if (!s) return;
-  const r1 = Math.min(s.r1, s.r2 === undefined ? s.r1 : s.r2);
-  const r2 = Math.max(s.r1, s.r2 === undefined ? s.r1 : s.r2);
-  const c1 = Math.min(s.c1, s.c2 === undefined ? s.c1 : s.c2);
-  const c2 = Math.max(s.c1, s.c2 === undefined ? s.c1 : s.c2);
+  if (!table) return;
   [...table.querySelectorAll("td")].forEach(td => {
-    const rr = +td.closest("tr").dataset.r, cc = +td.dataset.c;
-    if (rr >= r1 && rr <= r2 && cc >= c1 && cc <= c2) td.classList.add("sel");
+    const r = +td.closest("tr").dataset.r, c = +td.dataset.c;
+    td.classList.toggle("sel", ed.tabSel.has(r + "," + c));
   });
 }
 
 function applyMerge(ed) {
-  const s = ed._sel;
-  if (!s || s.r2 === undefined) { alert("click two corners first (select cells)"); return; }
-  const r1 = Math.min(s.r1, s.r2), c1 = Math.min(s.c1, s.c2);
-  const r2 = Math.max(s.r1, s.r2), c2 = Math.max(s.c1, s.c2);
+  const cells = [...ed.tabSel].map(k => { const [r, c] = k.split(",").map(Number); return {r, c}; });
+  if (cells.length < 2) { alert("shift+click at least two cells to merge"); return; }
+  const r1 = Math.min(...cells.map(p => p.r)), c1 = Math.min(...cells.map(p => p.c));
+  const r2 = Math.max(...cells.map(p => p.r)), c2 = Math.max(...cells.map(p => p.c));
   const rs = r2 - r1 + 1, cs = c2 - c1 + 1;
-  if (rs === 1 && cs === 1) { alert("select more than one cell to merge"); return; }
+  if (cells.length !== rs * cs) { alert("selection must be a rectangle (no gaps)"); return; }
   const spans = getSpans(ed);
   for (const sp of spans) {
     if (sp.r < r1 + rs && r1 < sp.r + sp.rs && sp.c < c1 + cs && c1 < sp.c + sp.cs) {
@@ -362,33 +359,35 @@ function applyMerge(ed) {
   spans.push({r: r1, c: c1, rs, cs});
   ed.dataset.spans = JSON.stringify(spans);
   renderEditor(ed, gridToMarkdown(grid), spans);
-  ed._sel = null; paintSel(ed);
+  ed.tabSel = new Set(); paintSel(ed);
 }
 
 function applySplit(ed) {
-  const s = ed._sel;
-  if (!s) { alert("select the merged cell to split (top-left of it)"); return; }
-  const r = s.r1, c = s.c1;
+  if (!ed.tabSel.size) { alert("shift+click the merged cell(s) to split"); return; }
   const spans = getSpans(ed);
-  const i = spans.findIndex(sp => sp.r === r && sp.c === c);
-  if (i < 0) { alert("that cell is not merged"); return; }
-  spans.splice(i, 1);
+  const before = spans.length;
+  for (const key of ed.tabSel) {
+    const [r, c] = key.split(",").map(Number);
+    const i = spans.findIndex(sp => sp.r === r && sp.c === c);
+    if (i >= 0) spans.splice(i, 1);
+  }
+  if (spans.length === before) { alert("no selected cell is merged"); return; }
   ed.dataset.spans = JSON.stringify(spans);
   renderEditor(ed, tableToMarkdown(ed), spans);
-  ed._sel = null; paintSel(ed);
+  ed.tabSel = new Set(); paintSel(ed);
 }
 
 function addRow(ed) {
   const grid = readGrid(ed);
   grid.push([]);                 // appended below; existing span coords don't shift
   renderEditor(ed, gridToMarkdown(grid), getSpans(ed));
-  ed._sel = null; paintSel(ed);
+  ed.tabSel = new Set(); paintSel(ed);
 }
 
 function addCol(ed) {
   const grid = readGrid(ed).map(r => [...r, ""]);  // appended at the right
   renderEditor(ed, gridToMarkdown(grid), getSpans(ed));
-  ed._sel = null; paintSel(ed);
+  ed.tabSel = new Set(); paintSel(ed);
 }
 
 /* ---------- item rendering ---------- */
@@ -496,7 +495,7 @@ function openEditor(el) {
       <button type="button" class="act split" title="un-merge the selected cell">Split cell</button>
       <button type="button" class="act addrow" title="append a row at the bottom">Add row</button>
       <button type="button" class="act addcol" title="append a column at the right">Add column</button>
-      <span class="muted">select two corners, then Merge</span>`;
+      <span class="muted">shift+click cells to select/deselect, then Merge</span>`;
     ed.insertBefore(toolbar, ed.firstChild);
   } else if (kind === "equation") {
     const ta = document.createElement("textarea");
