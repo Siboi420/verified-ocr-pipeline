@@ -30,6 +30,14 @@ OCR_PROMPT = (
     "Do not summarize or paraphrase."
 )
 
+# Dedicated prompt for caption-band crops: GLM likes to table-ify (or empty)
+# tiny regions under the generic prompt, which makes it drop the caption line.
+CAPTION_BAND_PROMPT = (
+    "Transcribe the text in this image as plain text lines. "
+    "Do NOT use markdown or HTML table syntax. "
+    "If it is a table caption, start it with 'Table'."
+)
+
 
 # ── Image Encoding ──────────────────────────────────────────────────────────
 
@@ -115,7 +123,7 @@ def _require_key():
     return API_KEY
 
 
-def ocr_page(image_path, page_num=None, max_tokens=4096):
+def ocr_page(image_path, page_num=None, max_tokens=4096, prompt=OCR_PROMPT):
     """Send a page image to GLM-OCR. Returns dict with text + metadata."""
     data_uri = encode_image(image_path)
     label = f"page {page_num}" if page_num else Path(image_path).name
@@ -127,7 +135,7 @@ def ocr_page(image_path, page_num=None, max_tokens=4096):
                 "role": "user",
                 "content": [
                     {"type": "image_url", "image_url": {"url": data_uri}},
-                    {"type": "text", "text": OCR_PROMPT},
+                    {"type": "text", "text": prompt},
                 ],
             }
         ],

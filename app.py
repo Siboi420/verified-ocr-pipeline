@@ -13,8 +13,8 @@ from pathlib import Path
 from flask import Flask, abort, jsonify, redirect, render_template, request, send_file  # pyright: ignore[reportMissingImports] — env lacks flask; runtime python3 has it
 
 import config
-from itemizer import parse_document, parse_table_caption, unwrap_html_caption  # pyright: ignore[reportMissingImports] — same-dir module
-from ocr_engine import assemble_markdown, ocr_batch, ocr_page, pdf_to_images, tesseract_ocr
+from itemizer import parse_document, parse_table_caption, pick_caption_from_band, unwrap_html_caption  # pyright: ignore[reportMissingImports] — same-dir module
+from ocr_engine import CAPTION_BAND_PROMPT, assemble_markdown, ocr_batch, ocr_page, pdf_to_images, tesseract_ocr
 
 BASE = Path(__file__).resolve().parent
 VALIDATION = BASE / "validation"
@@ -307,6 +307,54 @@ def _ocr_page_crop(doc, page, box):
         tmp.unlink(missing_ok=True)
 
 
+def _ocr_band(doc, page, box, dy, height=0.02):
+    """OCR a tight horizontal slice above/at the top of box, caption-focused.
+
+    Captions sit one line above their table; GLM drops the caption under the
+    generic prompt, so this uses CAPTION_BAND_PROMPT.
+    """
+    band = dict(box)
+    band["y"] = max(0.0, box["y"] - dy)
+    band["h"] = height
+    tmp = _render_crop(doc, page, band)
+    try:
+        return ocr_page(str(tmp), page_num=page, prompt=CAPTION_BAND_PROMPT)["text"]
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def _attach_caption_to_first_table(doc, page, box, items_before):
+    """Best-effort: caption the first table added by a bbox draw.
+
+    Tries two tight bands above/at the box top (the caption may sit one line
+    above the table, depending on where the user started the box). Only sets a
+    caption if band OCR starts with a real "Table N…" line (strict parse);
+    never overwrites; any OCR hiccup leaves the table uncaptioned.
+    """
+    if box.get("h", 0) < 0.02:  # tiny box: header/row re-OCR, no caption
+        return False
+    for dy in (0.016, 0.004):
+        try:
+            caption, num = pick_caption_from_band(_ocr_band(doc, page, box, dy))
+        except Exception:  # ponytail: band OCR is best-effort
+            continue
+        if caption is None:
+            continue
+        target = next(
+            (pg for pg in doc.get("pages", []) if pg["page"] == page), None
+        )
+        if target is None:
+            return False
+        for item in target["items"]:
+            if item["id"] in items_before:
+                continue
+            if item.get("type") == "table" and item.get("caption") is None:
+                item["caption"] = caption
+                item["table_number"] = num
+                return True
+    return False
+
+
 @app.route("/bbox_ocr/<doc_id>", methods=["POST"])
 def bbox_ocr(doc_id):
     if not re.fullmatch(r"[A-Za-z0-9._-]+", doc_id):
@@ -328,7 +376,11 @@ def bbox_ocr(doc_id):
     except Exception as e:  # OCR/backend failure -> JSON error, not a crash
         return jsonify({"ok": False, "error": str(e)}), 502
 
+    items_before = set(
+        it["id"] for pg in doc.get("pages", []) for it in pg["items"]
+    )
     added = append_bbox_items(doc, page, text)
+    _attach_caption_to_first_table(doc, page, box, items_before)
     save_doc(doc)
     return jsonify({"ok": True, "doc": doc, "added": added})
 

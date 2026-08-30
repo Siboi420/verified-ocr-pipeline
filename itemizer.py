@@ -17,7 +17,12 @@ INLINE_MATH_RE = re.compile(r"\\\(.+?\\\)|\$[^$\n]+\$")
 # A caption line: "Table 21.2.1—..." (em dash/dash/space after the number).
 TABLE_CAPTION_RE = re.compile(r"^\s*Table\s+(\d+(?:\.\d+)*)\b(.*)$", re.IGNORECASE)
 
-HTML_TABLE_RE = re.compile(r"<table\b.*?</table\s*>", re.IGNORECASE | re.DOTALL)
+HTML_TABLE_RE = re.compile(
+    r"<table\b.*?</table\s*>"  # well-formed
+    r"|<table\b.*?</tbody\s*>"  # GLM often omits </table>
+    r"|<table\b[^>]*>.*?(?=\n\s*\n|\Z)",  # unclosed, run to blank line/EOF
+    re.IGNORECASE | re.DOTALL
+)
 
 TYPE_PRIORITY = {"equation": 0, "table": 1, "text-math": 2, "text": 3}
 
@@ -106,6 +111,21 @@ def unwrap_html_caption(text):
         return text
     plain = re.sub(r"<[^>]+>", "", text)
     return "\n".join(ln.strip() for ln in plain.splitlines() if ln.strip())
+
+
+def pick_caption_from_band(text):
+    """Extract a table caption from OCR of a box's top band.
+
+    Unlike parse_table_caption there is NO first-line fallback: only a line
+    that actually starts "Table N…" is trusted, otherwise (None, None) —
+    otherwise a band landing on a table header would become a bogus caption.
+    """
+    plain = unwrap_html_caption(text)
+    for ln in plain.splitlines():
+        if ln.strip():
+            m = TABLE_CAPTION_RE.match(ln.strip())
+            return (ln.strip(), m.group(1)) if m else (None, None)
+    return None, None
 
 
 def _extract_tables(body):

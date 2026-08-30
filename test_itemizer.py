@@ -114,6 +114,27 @@ Some explanatory text.
     check(itemizer.unwrap_html_caption("plain text") == "plain text",
           "unwrap_html_caption: non-HTML text unchanged")
 
+    # pick_caption_from_band: strict — only a real "Table N…" line wins.
+    check(itemizer.pick_caption_from_band("Table 21.2.1—Strength reduction factors $\\phi$")
+          == ("Table 21.2.1—Strength reduction factors $\\phi$", "21.2.1"),
+          "pick_caption_from_band: caption line")
+    check(itemizer.pick_caption_from_band(
+        '<table border="1"><tr><td>Table 12.3—Foo</td></tr></table>')
+          == ("Table 12.3—Foo", "12.3"),
+          "pick_caption_from_band: HTML-wrapped caption")
+    check(itemizer.pick_caption_from_band("Action or structural element | φ | Exceptions")
+          == (None, None), "pick_caption_from_band: table header -> no caption")
+    check(itemizer.pick_caption_from_band("") == (None, None),
+          "pick_caption_from_band: empty -> none")
+
+    # GLM sometimes emits an unclosed <table>…</tbody> (no </table>).
+    unclosed = "--- Page 1 ---\n\n<p>lead</p>\n<table><thead><tr><th>A</th><th>B</th></tr></thead><tbody><tr><td>1</td><td>2</td></tr></tbody>\n\nText after.\n"
+    up = itemizer.parse_document(unclosed, "d")[0]["items"]
+    check(any(it["type"] == "table" and "|A|" in it["content"] for it in up),
+          "unclosed <table>…</tbody> converts to a table item")
+    check(any(it["type"] == "text" and it["content"] == "Text after." for it in up),
+          "text after the unclosed table is not eaten")
+
     print("itemizer: all checks passed")
 
 
