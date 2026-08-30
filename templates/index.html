@@ -65,6 +65,7 @@ window.MathJax = {tex: {inlineMath: [["\\(", "\\)"], ["$", "$"]]}};
   <span class="muted">default review: equations + tables</span>
   <label class="muted"><input type="checkbox" id="showMath"> show inline math</label>
   <label class="muted"><input type="checkbox" id="showText"> show text</label>
+  <label class="muted"><input type="checkbox" id="onlyOcr"> OCR'd pages only</label>
   <label class="muted">caption box OCR:
     <select id="captionEngine">
       <option value="glm" selected>GLM</option>
@@ -75,6 +76,8 @@ window.MathJax = {tex: {inlineMath: [["\\(", "\\)"], ["$", "$"]]}};
   <button id="bboxBtn" title="drag on the page to OCR that region only">Draw box</button>
   <button id="bulkSkip">Pass for now (selected)</button>
   <button id="bulkAccept">Accept selected</button>
+  <button id="bulkAcceptMath" title="accept all inline-math text items on this page">Accept inline math</button>
+  <button id="bulkAcceptText" title="accept all plain text items on this page">Accept text</button>
   <button id="discardBtn" title="delete this document from the queue">Discard document</button>
   <a href="/"><button>‹ documents</button></a>
 </div>
@@ -130,6 +133,25 @@ const DOCS = null;
 let pageNo = 1;
 let cursorId = null;       // currently highlighted item id
 let lastFlatIdx = -1;      // flat index before last action (for advance)
+let onlyOcr = false;       // restrict page nav to pages that have items
+
+function navPages() {
+  const ocrPages = (DOC.pages || []).map(p => p.page);
+  if (onlyOcr && ocrPages.length) return ocrPages;
+  const all = [];
+  for (let n = 1; n <= DOC.n_pages; n++) all.push(n);
+  return all;
+}
+
+function stepPage(dir) {           // dir: -1 prev, +1 next
+  const list = navPages();
+  let i = list.indexOf(pageNo);
+  if (i === -1) i = dir > 0 ? -1 : list.length;
+  const j = Math.max(0, Math.min(list.length - 1, i + dir));
+  pageNo = list[j];
+  cursorId = null;
+  render();
+}
 const autoOcr = async () => {
   const bar = document.getElementById("ocrbar");
   if (!bar) return;
@@ -366,7 +388,7 @@ function render() {
     `OCR'd ${covered}/${DOC.n_pages} pages`;
   const sel = document.getElementById("pageSel");
   sel.innerHTML = "";
-  for (let n = 1; n <= DOC.n_pages; n++) {
+  for (const n of navPages()) {
     const opt = document.createElement("option");
     opt.value = n; opt.textContent = n;
     if (n === pageNo) opt.selected = true;
@@ -486,12 +508,35 @@ document.getElementById("pageSel").addEventListener("change", e => {
   cursorId = null;
   render();
 });
-document.getElementById("prevPg").addEventListener("click", () => {
-  pageNo = Math.max(1, pageNo - 1); cursorId = null; render();
+document.getElementById("prevPg").addEventListener("click", () => stepPage(-1));
+document.getElementById("nextPg").addEventListener("click", () => stepPage(+1));
+document.getElementById("onlyOcr").addEventListener("change", () => {
+  onlyOcr = document.getElementById("onlyOcr").checked;
+  if (onlyOcr) {
+    const list = navPages();
+    if (!list.includes(pageNo)) pageNo = list[0];
+  }
+  cursorId = null;
+  render();
 });
-document.getElementById("nextPg").addEventListener("click", () => {
-  pageNo = Math.min(DOC.n_pages, pageNo + 1); cursorId = null; render();
-});
+
+document.getElementById("bulkAcceptMath").addEventListener("click", () => bulkAcceptType("math"));
+document.getElementById("bulkAcceptText").addEventListener("click", () => bulkAcceptType("text"));
+
+async function bulkAcceptType(kind) {
+  const pg = (DOC.pages || []).find(p => p.page === pageNo);
+  const ids = pg ? pg.items
+    .filter(it => it.type === "text"
+      && (kind === "math" ? it.has_inline_math : !it.has_inline_math)
+      && it.status !== "verified" && it.status !== "rejected")
+    .map(it => it.id) : [];
+  if (!ids.length) { alert("nothing to accept on this page"); return; }
+  try {
+    const out = await post("/bulk", {doc_id: DOC.doc_id, action: "accept", item_ids: ids});
+    Object.assign(DOC, out.doc);
+    render();
+  } catch (e) { alert("Bulk failed: " + e.message); }
+}
 
 /* ---------- bounding-box OCR ---------- */
 let bboxMode = false;

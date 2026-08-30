@@ -126,6 +126,9 @@ def main():
     check("tex-chtml.js" in html and "tex-svg.js" not in html,
           "review page uses MathJax CHTML")
     check('id="captionEngine"' in html, "review page has caption engine select")
+    check('id="onlyOcr"' in html, "review page has OCR'd-only page filter")
+    check('id="bulkAcceptMath"' in html, "review page has inline-math bulk accept button")
+    check('id="bulkAcceptText"' in html, "review page has text bulk accept button")
 
     # page PNG
     r = client.get(f"/page/{doc_id}/1.png")

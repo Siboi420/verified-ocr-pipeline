@@ -124,6 +124,14 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   The item counter always reflects the current page — pages with no items (e.g.
   outside the OCR page range) show "no items on page N", never a stale count from
   a previously-viewed page.
+  An "OCR'd pages only" checkbox (`onlyOcr`) restricts `#pageSel` and prev/next to
+  pages in `DOC.pages` (pages with ≥1 item; falls back to all pages when there are
+  none), via `navPages()` (filtered list or full 1..n) and `stepPage(dir)` (steps the
+  same list, defaulting to first/last when off it). Two per-page bulk buttons reuse
+  the existing `/bulk` accept route with computed `item_ids`: `bulkAcceptMath`/
+  `bulkAcceptText` (→ `bulkAcceptType(kind)`) accept every current-page text item
+  with/without `has_inline_math` that isn't verified/rejected (works regardless of
+  the showMath/showText toggles; alerts "nothing to accept on this page" when empty).
   **Note:** `location.reload()` refreshes DOC after OCR job completes (deliberate;
   the old inline `const DOC = ([^;]+);` regex broke on `;` in content).
 - `validation/` — `pending/` (docs), `verified/`, `rejected/` (per-item JSON), `uploads/<doc_id>/` (pdf, md, page PNGs).
@@ -134,6 +142,8 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
 - Timeouts in `ocr_engine.py` are 600s.
 - Itemizer handles **HTML tables** (GLM-OCR sometimes emits HTML instead of markdown).
 - Auto-OCR on PDF-only upload works (blue bar, polls, reloads, `?ocr=1`).
+- "OCR'd pages only" filter + per-page bulk accept (inline math / text) work via
+  the existing `/bulk` route — no backend changes.
 - Upload accepts an optional `ocr_pages` range — single (`5`, `1-3`) or
   comma-separated (`2-3, 4-9`); stored on the pending doc JSON as a list of
   `[start, end]` pairs and honored by the initial OCR run only (re-OCR of extra
@@ -164,7 +174,7 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
 ## Tests / verification
 
 - `python3 test_itemizer.py` — 61 itemizer assertions.
-- `python3 smoke_test.py` — 73 end-to-end checks via Flask test client (no live OCR;
+- `python3 smoke_test.py` — 75 end-to-end checks via Flask test client (no live OCR;
   asserts `?ocr=1` redirect, no-key OCR error, `parse_page_range`/`parse_page_ranges`
   valid+invalid forms, `ocr_pages` storage incl. multiple ranges, invalid -> 400,
   md-wins-over-range, NaN bbox coords rejected).
