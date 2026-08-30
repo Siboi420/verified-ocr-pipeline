@@ -23,7 +23,9 @@ window.MathJax = {tex: {inlineMath: [["\\(", "\\)"], ["$", "$"]]}};
   .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
   #main { display: flex; gap: 16px; align-items: flex-start; }
   #pane { flex: 0 0 46%; max-width: 640px; position: sticky; top: 12px; }
-  #pane img { width: 100%; border: 1px solid var(--line); border-radius: 4px; background: #fff; }
+  #imgWrap { overflow: auto; max-height: calc(100vh - 250px); }
+  #imgBox { position: relative; display: inline-block; min-width: 100%; }
+  #pageImg { display: block; border: 1px solid var(--line); border-radius: 4px; background: #fff; }
   #bboxSel { position: absolute; border: 2px solid #ef4444; background: rgba(239,68,68,.15);
              pointer-events: none; display: none; z-index: 5; }
   #items { flex: 1 1 auto; display: flex; flex-direction: column; gap: 10px; }
@@ -90,7 +92,17 @@ window.MathJax = {tex: {inlineMath: [["\\(", "\\)"], ["$", "$"]]}};
   <a href="/"><button>‹ documents</button></a>
 </div>
 <div id="main">
-  <div id="pane"><img id="pageImg" alt="page" draggable="false"><div class="muted" id="pgInfo"></div><div id="bboxSel"></div></div>
+  <div id="pane">
+    <div class="row" style="margin-bottom:4px">
+      <span class="muted">zoom</span>
+      <button id="zoomOut" title="zoom out">−</button>
+      <span class="muted" id="zoomPct">100%</span>
+      <button id="zoomIn" title="zoom in">+</button>
+      <button id="zoomFit" title="reset to fit width">fit</button>
+    </div>
+    <div id="imgWrap"><div id="imgBox"><img id="pageImg" alt="page" draggable="false"><div id="bboxSel"></div></div></div>
+    <div class="muted" id="pgInfo"></div>
+  </div>
   <div id="items"></div>
 </div>
 {% else %}
@@ -723,6 +735,43 @@ async function bulkByType(action, kind) {
   } catch (e) { alert("Bulk failed: " + e.message); }
 }
 
+/* ---------- preview zoom ---------- */
+let zoom = 1;
+let imgBase = 0;          // image width in px at zoom=1 (pane content width)
+
+function applyZoom() {
+  document.getElementById("pageImg").style.width = Math.round(imgBase * zoom) + "px";
+  document.getElementById("zoomPct").textContent = Math.round(zoom * 100) + "%";
+}
+
+function measureBase() {
+  imgBase = document.getElementById("imgWrap").clientWidth || 640;
+  applyZoom();
+}
+
+function bindZoom() {
+  document.getElementById("zoomOut").addEventListener("click", () => {
+    zoom = Math.max(0.25, zoom / 1.25);
+    applyZoom();
+  });
+  document.getElementById("zoomIn").addEventListener("click", () => {
+    zoom = Math.min(4, zoom * 1.25);
+    applyZoom();
+  });
+  document.getElementById("zoomFit").addEventListener("click", () => {
+    zoom = 1;
+    applyZoom();
+  });
+  window.addEventListener("resize", measureBase);
+  document.getElementById("imgWrap").addEventListener("wheel", e => {
+    if (!e.ctrlKey) return;
+    e.preventDefault();
+    zoom = Math.max(0.25, Math.min(4, zoom * (e.deltaY < 0 ? 1.1 : 1 / 1.1)));
+    applyZoom();
+  }, {passive: false});
+  measureBase();
+}
+
 /* ---------- bounding-box OCR ---------- */
 let bboxMode = false;
 let bboxStart = null;
@@ -730,9 +779,11 @@ let captionItemId = null;  // non-null while bbox is targeting a table caption
 
 function imgFrac(e) {
   const r = document.getElementById("pageImg").getBoundingClientRect();
+  // clamp: mouse can land outside the image when zoomed/scrolled
+  const clamp = v => Math.max(0, Math.min(1, v));
   return {
-    x: (e.clientX - r.left) / r.width,
-    y: (e.clientY - r.top) / r.height,
+    x: clamp((e.clientX - r.left) / r.width),
+    y: clamp((e.clientY - r.top) / r.height),
   };
 }
 
@@ -744,6 +795,7 @@ function bboxRect(e) {
 
 const bboxBtn = document.getElementById("bboxBtn");
 const bboxSel = document.getElementById("bboxSel");
+bindZoom();
 
 bboxBtn.addEventListener("click", () => {
   captionItemId = null;  // plain Draw box: not a caption capture

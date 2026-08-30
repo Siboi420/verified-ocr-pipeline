@@ -161,6 +161,13 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   kept as `item.table_spans` (`[{r,c,rs,cs}]`, 0-indexed over the parsed grid) and
   posted with accept/edit; the exported pipe-markdown keeps the rectangular grid with
   covered cells empty (plain markdown has no span syntax — spans live in `table_spans`).
+  The PDF preview (`#pageImg`, left pane) zooms **independently of the validation panel**:
+  the fixed-size `#pane` column shrinks the page image to its natural fit width and a zoom
+  bar (`−`/`%`/`+`, 25%–400%, `zoomFit` re-fits) + **ctrl+wheel** on the preview set the image
+  width in px via `applyZoom()`; `#bboxSel` lives in an `#imgBox` inline-block that
+  shrink-wraps the image so the overlay tracks zoom, and `#imgWrap` scrolls when zoomed in
+  (zoom re-measured on window resize). `imgFrac()` **clamps to [0,1]** so a draw-box drag
+  that ends outside the zoomed image never sends out-of-range fractions to the server.
 - `validation/` — `pending/` (docs), `verified/`, `rejected/` (per-item JSON), `uploads/<doc_id>/` (pdf, md, page PNGs).
 
 ## Current state (verified facts — don't contradict)
