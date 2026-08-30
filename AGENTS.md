@@ -88,8 +88,11 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   coords through `_parse_box`, rejecting non-finite (NaN/Inf) values with 400.
   `apply_action` (used by `/item/<id>/action`) treats `verified`/`rejected` items as
   final except for an explicit **flip to the other state** (accept↔reject; same-state
-  and skip stay no-ops), and removes the stale counterpart JSON
-  (`verified/`↔`rejected/`) when flipping so the copies never diverge. `/bulk` accepts
+  and skip stay no-ops), removes the stale counterpart JSON
+  (`verified/`↔`rejected/`) when flipping so the copies never diverge, and carries
+  an optional `table_spans` field (merged-cell map for tables) into the item and
+  verified/rejected JSON. Accept-with-new-content also updates an already-verified
+  item (used when re-editing a merged table). `/bulk` accepts
   `skip|accept|reject` with the same semantics: skip never touches finalized items,
   accept/reject flip them; already-in-target-state items are no-ops.
 - `rag_uploader.py` — reads `validation/verified/*.json`, groups items by
@@ -148,6 +151,12 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   the old inline `const DOC = ([^;]+);` regex broke on `;` in content).
   Accepted/rejected items are visually distinct: `.item.done` dims, `.item.verified`
   gets a green border/tint, `.item.rejected` a red one (status is also in the meta text).
+  Table items can be **consolidated**: the open editor has Merge cells / Split cell
+  buttons — click two corners to select a rectangle (`.sel` highlight), Merge joins it
+  into one cell (`rowspan`/`colspan`, `.merged` tint), Split undoes it. The span map is
+  kept as `item.table_spans` (`[{r,c,rs,cs}]`, 0-indexed over the parsed grid) and
+  posted with accept/edit; the exported pipe-markdown keeps the rectangular grid with
+  covered cells empty (plain markdown has no span syntax — spans live in `table_spans`).
 - `validation/` — `pending/` (docs), `verified/`, `rejected/` (per-item JSON), `uploads/<doc_id>/` (pdf, md, page PNGs).
 
 ## Current state (verified facts — don't contradict)
@@ -189,7 +198,7 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
 ## Tests / verification
 
 - `python3 test_itemizer.py` — 61 itemizer assertions.
-- `python3 smoke_test.py` — 84 end-to-end checks via Flask test client (no live OCR;
+- `python3 smoke_test.py` — 89 end-to-end checks via Flask test client (no live OCR;
   asserts `?ocr=1` redirect, no-key OCR error, `parse_page_range`/`parse_page_ranges`
   valid+invalid forms, `ocr_pages` storage incl. multiple ranges, invalid -> 400,
   md-wins-over-range, NaN bbox coords rejected).

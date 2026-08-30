@@ -170,6 +170,30 @@ def main():
     check(next(i for i in pending["pages"][0]["items"] if i["id"] == table_id)["status"] == "verified",
           "flip back restores verified")
 
+    # table merge info (table_spans) persists through accept and re-editing
+    span_md = "| Specimen | f_c (MPa) |\n|---|---|\n| A-1 | 30 |\n| A-1 | 32 |"
+    r = client.post(f"/item/{doc_id}/{table_id}/action",
+                    json={"action": "accept", "content": span_md,
+                          "table_spans": [{"r": 2, "c": 0, "rs": 2, "cs": 1}]})
+    check(r.status_code == 200, "accept table with table_spans 200")
+    verified = read_json(REPO / "validation" / "verified" / f"{table_id}.json")
+    check(verified.get("table_spans") == [{"r": 2, "c": 0, "rs": 2, "cs": 1}],
+          "verified JSON carries table_spans")
+    check(verified["content"] == span_md, "verified content keeps markdown table")
+    pending = read_json(REPO / "validation" / "pending" / "smoke.json")
+    check(next(i for i in pending["pages"][0]["items"] if i["id"] == table_id)["table_spans"]
+          == [{"r": 2, "c": 0, "rs": 2, "cs": 1}],
+          "pending item carries table_spans")
+
+    # editing an already-verified table (accept with new content+spans) updates it
+    r = client.post(f"/item/{doc_id}/{table_id}/action",
+                    json={"action": "accept", "content": "| X |\n|---|\n| y |",
+                          "table_spans": []})
+    verified = read_json(REPO / "validation" / "verified" / f"{table_id}.json")
+    check(r.status_code == 200 and verified["content"].startswith("| X |")
+          and verified.get("table_spans") == [],
+          "re-accepting a verified table with new content updates it")
+
     # reject equation -> rejected/
     eq_id = p1[0]["id"]
     r = client.post(f"/item/{doc_id}/{eq_id}/action", json={"action": "reject"})

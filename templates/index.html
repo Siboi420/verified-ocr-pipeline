@@ -42,6 +42,10 @@ window.MathJax = {tex: {inlineMath: [["\\(", "\\)"], ["$", "$"]]}};
   .mathbox { overflow-x: auto; }
   .caption { font-weight: 600; margin: 6px 0 4px; }
   table.grid { border-collapse: collapse; width: 100%; }
+  table.grid { border-collapse: collapse; }
+  table.grid td { border: 1px solid #ddd; }
+  table.grid td.sel { outline: 2px solid #3b82f6; }
+  table.grid td.merged { background: #f5f3ff; }
   table.grid input { width: 100%; border: 1px solid #ddd; border-radius: 3px; padding: 3px 5px; font-size: 13px; }
   .actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
   .ok { color: #065f46; } .err { color: #991b1b; }
@@ -228,15 +232,29 @@ function parseTableColWidths(md) {
   return m ? m.replace(/^\|/, "").replace(/\|$/, "").split("|").length : 0;
 }
 
-function renderEditor(el, md) {
+function renderEditor(el, md, spans) {
+  const old = el.querySelector("table.grid");
+  if (old) old.remove();
   const grid = parseTable(md);
   const ncols = grid.length ? Math.max(...grid.map(r => r.length)) : 0;
+  spans = spans || [];
+  const covered = new Set();
+  for (const s of spans)
+    for (let r = s.r; r < s.r + s.rs; r++)
+      for (let c = s.c; c < s.c + s.cs; c++)
+        if (r !== s.r || c !== s.c) covered.add(r + "," + c);
   const table = document.createElement("table");
   table.className = "grid";
-  for (const row of grid) {
+  for (let r = 0; r < grid.length; r++) {
+    const row = grid[r];
     const tr = document.createElement("tr");
+    tr.dataset.r = r;
     for (let c = 0; c < ncols; c++) {
+      if (covered.has(r + "," + c)) continue;
+      const s = spans.find(sp => sp.r === r && sp.c === c);
       const td = document.createElement("td");
+      td.dataset.c = c;
+      if (s) { td.rowSpan = s.rs; td.colSpan = s.cs; td.classList.add("merged"); }
       const input = document.createElement("input");
       input.value = row[c] !== undefined ? unescapePipe(row[c]) : "";
       td.appendChild(input);
@@ -247,19 +265,117 @@ function renderEditor(el, md) {
   el.appendChild(table);
 }
 
-function tableToMarkdown(el) {
-  const rows = [...el.querySelectorAll("table.grid tr")]
-    .map(tr => [...tr.querySelectorAll("input")].map(i => escapePipe(i.value.trim())));
-  if (!rows.length) return "";
-  const ncols = Math.max(...rows.map(r => r.length));
-  const pad = r => {
-    while (r.length < ncols) r.push("");
-    return r;
-  };
-  const all = rows.map(pad);
+// read span map safely (spans are trusted internal JSON, paranoia for bad bytes)
+function getSpans(el) {
+  try { return JSON.parse(el.dataset.spans || "[]") || []; }
+  catch { return []; }
+}
+
+// read the grid back as an array of rows (spans -> covered cells become "")
+function readGrid(el) {
+  const spans = getSpans(el);
+  const covered = new Set();
+  for (const s of spans)
+    for (let r = s.r; r < s.r + s.rs; r++)
+      for (let c = s.c; c < s.c + s.cs; c++)
+        if (r !== s.r || c !== s.c) covered.add(r + "," + c);
+  const trs = [...el.querySelectorAll("table.grid tr")];
+  const grid = [];
+  for (let r = 0; r < trs.length; r++) {
+    grid[r] = [];
+    let c = 0;
+    for (const inp of trs[r].querySelectorAll("input")) {
+      while (covered.has(r + "," + c)) { grid[r][c] = ""; c++; }
+      grid[r][c] = unescapePipe(inp.value.trim()); c++;
+    }
+  }
+  return grid;
+}
+
+function gridToMarkdown(grid) {
+  if (!grid.length) return "";
+  const ncols = Math.max(0, ...grid.map(r => r.length));
+  const pad = r => { while (r.length < ncols) r.push(""); return r; };
+  const all = grid.map(pad);
   const header = all[0], body = all.slice(1);
-  const fmt = r => "| " + r.join(" | ") + " |";
+  const fmt = r => "| " + r.map(escapePipe).join(" | ") + " |";
   return [fmt(header), fmt(header.map(() => "---")), ...body.map(fmt)].join("\n");
+}
+
+function tableToMarkdown(el) {
+  return gridToMarkdown(readGrid(el));
+}
+
+function initMergeSel(ed) {
+  const table = ed.querySelector("table.grid");
+  if (!table) return;
+  ed._sel = null;
+  table.addEventListener("click", e => {
+    const td = e.target.closest("td");
+    if (!td) return;
+    const r = +td.closest("tr").dataset.r, c = +td.dataset.c;
+    const s = ed._sel;
+    if (s && s.r2 === undefined) ed._sel = {r1: s.r1, c1: s.c1, r2: r, c2: c}; // 2nd corner
+    else ed._sel = {r1: r, c1: c, r2: undefined};                            // anchor / reset
+    paintSel(ed);
+  });
+}
+
+function paintSel(ed) {
+  const table = ed.querySelector("table.grid");
+  [...table.querySelectorAll("td")].forEach(td => td.classList.remove("sel"));
+  const s = ed._sel;
+  if (!s) return;
+  const r1 = Math.min(s.r1, s.r2 === undefined ? s.r1 : s.r2);
+  const r2 = Math.max(s.r1, s.r2 === undefined ? s.r1 : s.r2);
+  const c1 = Math.min(s.c1, s.c2 === undefined ? s.c1 : s.c2);
+  const c2 = Math.max(s.c1, s.c2 === undefined ? s.c1 : s.c2);
+  [...table.querySelectorAll("td")].forEach(td => {
+    const rr = +td.closest("tr").dataset.r, cc = +td.dataset.c;
+    if (rr >= r1 && rr <= r2 && cc >= c1 && cc <= c2) td.classList.add("sel");
+  });
+}
+
+function applyMerge(ed) {
+  const s = ed._sel;
+  if (!s || s.r2 === undefined) { alert("click two corners first (select cells)"); return; }
+  const r1 = Math.min(s.r1, s.r2), c1 = Math.min(s.c1, s.c2);
+  const r2 = Math.max(s.r1, s.r2), c2 = Math.max(s.c1, s.c2);
+  const rs = r2 - r1 + 1, cs = c2 - c1 + 1;
+  if (rs === 1 && cs === 1) { alert("select more than one cell to merge"); return; }
+  const spans = getSpans(ed);
+  for (const sp of spans) {
+    if (sp.r < r1 + rs && r1 < sp.r + sp.rs && sp.c < c1 + cs && c1 < sp.c + sp.cs) {
+      alert("selection overlaps an existing merge"); return;
+    }
+  }
+  const grid = readGrid(ed);
+  const parts = [];
+  for (let r = r1; r <= r2; r++) for (let c = c1; c <= c2; c++) {
+    const v = ((grid[r] && grid[r][c]) || "").trim();
+    if (v) parts.push(v);
+  }
+  grid[r1][c1] = parts.join(" ");
+  for (let r = r1; r <= r2; r++) for (let c = c1; c <= c2; c++) {
+    if (r !== r1 || c !== c1) grid[r][c] = "";
+  }
+  spans.push({r: r1, c: c1, rs, cs});
+  ed.dataset.spans = JSON.stringify(spans);
+  renderEditor(ed, gridToMarkdown(grid), spans);
+  ed._sel = null; paintSel(ed);
+}
+
+function applySplit(ed) {
+  const s = ed._sel;
+  if (!s) { alert("select the merged cell to split (top-left of it)"); return; }
+  const r = s.r1, c = s.c1;
+  const spans = getSpans(ed);
+  const i = spans.findIndex(sp => sp.r === r && sp.c === c);
+  if (i < 0) { alert("that cell is not merged"); return; }
+  spans.splice(i, 1);
+  ed.dataset.spans = JSON.stringify(spans);
+  renderEditor(ed, tableToMarkdown(ed), spans);
+  ed._sel = null; paintSel(ed);
 }
 
 /* ---------- item rendering ---------- */
@@ -282,7 +398,7 @@ function itemEditorOpen(el) {
 function itemContent(el) {
   const ed = el.querySelector(".editor");
   if (ed) {
-    if (ed.dataset.kind === "table") return tableToMarkdown(ed);
+    if (ed.dataset.kind === "table") return {content: tableToMarkdown(ed), table_spans: getSpans(ed)};
     return ed.querySelector("textarea").value;
   }
   return el.dataset.content;
@@ -316,6 +432,7 @@ function renderItem(it) {
     el.appendChild(box);
     if (window.MathJax) MathJax.typesetPromise([box]);
   } else if (it.type === "table") {
+    el.dataset.spans = it.table_spans ? JSON.stringify(it.table_spans) : "";
     if (it.caption) {
       const cap = document.createElement("div");
       cap.className = "caption";
@@ -356,8 +473,16 @@ function openEditor(el) {
   ed.className = "editor";
   ed.dataset.kind = kind;
   if (kind === "table") {
-    // re-render grid with a "done" bar handled by Save via Edit+Accept
+    ed.dataset.spans = el.dataset.spans || "[]";
     renderEditor(ed, el.dataset.content);
+    initMergeSel(ed);
+    const toolbar = document.createElement("div");
+    toolbar.className = "actions";
+    toolbar.innerHTML = `
+      <button type="button" class="act merge" title="join the selected cells into one">Merge cells</button>
+      <button type="button" class="act split" title="un-merge the selected cell">Split cell</button>
+      <span class="muted">select two corners, then Merge</span>`;
+    ed.insertBefore(toolbar, ed.firstChild);
   } else if (kind === "equation") {
     const ta = document.createElement("textarea");
     ta.rows = 3;
@@ -456,8 +581,16 @@ function nextTarget(flatIdx) {
 
 async function act(itemId, action, content) {
   try {
-    const out = await post(`/item/${DOC.doc_id}/${itemId}/action`,
-      content !== undefined ? {action, content} : {action});
+    const body = {action};
+    if (content !== undefined) {
+      if (typeof content === "object" && content !== null && "content" in content) {
+        body.content = content.content;                         // table editor payload: {content, table_spans}
+        if (content.table_spans) body.table_spans = content.table_spans;
+      } else {
+        body.content = content;
+      }
+    }
+    const out = await post(`/item/${DOC.doc_id}/${itemId}/action`, body);
     Object.assign(DOC, out.doc);
     const flatIdx = findFlatIdx(itemId);
     const target = nextTarget(flatIdx === -1 ? flatIdx : findFlatIdx(itemId));
@@ -483,6 +616,16 @@ document.getElementById("items").addEventListener("click", async e => {
     bboxMode = true;
     bboxBtn.textContent = "Drawing…";
     bboxSel.style.display = "none";
+    return;
+  }
+  if (cls.includes("merge")) {
+    const ed = el.querySelector(".editor");
+    if (ed) applyMerge(ed);
+    return;
+  }
+  if (cls.includes("split")) {
+    const ed = el.querySelector(".editor");
+    if (ed) applySplit(ed);
     return;
   }
   if (cls.includes("edit")) {

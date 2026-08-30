@@ -110,7 +110,7 @@ def append_bbox_items(doc, page, markdown):
     return len(new_items)
 
 
-def apply_action(doc, item_id, action, content=None):
+def apply_action(doc, item_id, action, content=None, table_spans=None):
     """Update an item's status in doc; write verified/rejected JSON copies."""
     for page in doc.get("pages", []):
         for item in page["items"]:
@@ -119,9 +119,12 @@ def apply_action(doc, item_id, action, content=None):
             if item["status"] in ("verified", "rejected"):
                 # finalized; only an explicit flip to the OTHER state is allowed
                 if action == "skip" or item["status"] == ("verified" if action == "accept" else "rejected"):
-                    return True  # same state or skip: no-op
+                    if action != "accept" or content in (None, ""):
+                        return True  # same state or skip: no-op (accept w/ content still updates)
             item["status"] = action if action in ("verified", "rejected", "skipped") else item["status"]
             if action in ("accept", "reject"):
+                if table_spans is not None:
+                    item["table_spans"] = table_spans
                 final = content if content not in (None, "") else item["content"]
                 payload = {
                     "doc_id": doc["doc_id"],
@@ -136,6 +139,8 @@ def apply_action(doc, item_id, action, content=None):
                 if item.get("caption") is not None:
                     payload["caption"] = item["caption"]
                     payload["table_number"] = item.get("table_number")
+                if item.get("table_spans") is not None:
+                    payload["table_spans"] = item["table_spans"]
                 target = VERIFIED_DIR if action == "accept" else REJECTED_DIR
                 (target / f"{item_id}.json").write_text(json.dumps(payload, indent=2))
                 stale = REJECTED_DIR if action == "accept" else VERIFIED_DIR
@@ -525,7 +530,7 @@ def item_action(doc_id, item_id):
     action = data.get("action")
     if action not in ("accept", "reject", "skip"):
         abort(400, "action must be accept|reject|skip")
-    if not apply_action(doc, item_id, action, data.get("content")):
+    if not apply_action(doc, item_id, action, data.get("content"), data.get("table_spans")):
         abort(404, f"item {item_id} not found")
     save_doc(doc)
     return jsonify({"ok": True, "doc": doc})
