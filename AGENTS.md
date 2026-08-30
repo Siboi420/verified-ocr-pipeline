@@ -137,6 +137,8 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   the showMath/showText toggles; alerts "nothing to accept on this page" when empty).
   **Note:** `location.reload()` refreshes DOC after OCR job completes (deliberate;
   the old inline `const DOC = ([^;]+);` regex broke on `;` in content).
+  Accepted/rejected items are visually distinct: `.item.done` dims, `.item.verified`
+  gets a green border/tint, `.item.rejected` a red one (status is also in the meta text).
 - `validation/` — `pending/` (docs), `verified/`, `rejected/` (per-item JSON), `uploads/<doc_id>/` (pdf, md, page PNGs).
 
 ## Current state (verified facts — don't contradict)

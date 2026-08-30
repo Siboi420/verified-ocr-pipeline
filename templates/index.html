@@ -28,7 +28,9 @@ window.MathJax = {tex: {inlineMath: [["\\(", "\\)"], ["$", "$"]]}};
              pointer-events: none; display: none; z-index: 5; }
   #items { flex: 1 1 auto; display: flex; flex-direction: column; gap: 10px; }
   .item { border: 1px solid var(--line); border-radius: 6px; background: #fff; padding: 10px; }
-  .item.done { opacity: .55; }
+  .item.done { opacity: .6; }
+  .item.verified { border-color: #22c55e; background: #f0fdf4; }
+  .item.rejected { border-color: #ef4444; background: #fef2f2; }
   .item.active { outline: 2px solid #3b82f6; }
   .badge { display: inline-block; font-size: 11px; text-transform: uppercase; letter-spacing: .5px;
            background: #eef2ff; color: #3730a3; border-radius: 3px; padding: 2px 6px; margin-right: 8px; }
@@ -286,7 +288,10 @@ function itemContent(el) {
 
 function renderItem(it) {
   const el = document.createElement("div");
-  el.className = "item" + (it.status === "verified" || it.status === "rejected" ? " done" : "");
+  let cls = "item";
+  if (it.status === "verified") cls += " done verified";
+  else if (it.status === "rejected") cls += " done rejected";
+  el.className = cls;
   el.dataset.id = it.id;
   el.dataset.type = it.type;
   el.dataset.content = it.content;
