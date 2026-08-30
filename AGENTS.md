@@ -2,6 +2,25 @@
 
 Context file for AI assistants. Read fully before working in this project.
 
+## ⛔ Mandatory: keep this file in sync with committed changes
+
+**Every commit that changes behavior, file layout, routes, item shapes, tooling,
+or test counts MUST update this file in the same commit.** An AGENTS.md that lies
+or lags causes wrong assumptions downstream — treat a stale entry as a bug.
+
+Before committing, check these sections against the diff and update what moved:
+- `What this project is` / `Architecture / data flow` — new routes, scripts, files,
+  data-flow steps.
+- Per-file bullets — new functions/behaviors, renamed or retired logic.
+- `Current state (verified facts)` — facts that changed or were resolved;
+  remove or rewrite resolved open questions.
+- `Known gotchas / foot-guns` — new failure modes you hit.
+- `Tests / verification` — assertion counts (count actual `check(` calls),
+  commands that changed, new test files.
+
+A commit that touches code but not AGENTS.md is incomplete. (This rule itself is
+the result of a commit that forgot it once.)
+
 ## What this project is
 
 A local OCR-validation toolkit for structural/seismic engineering research (Kresna's
