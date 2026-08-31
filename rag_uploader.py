@@ -136,14 +136,21 @@ def _item_id(it):
 # Plain-text decoding for table cells: a small ACI-domain renderer so the
 # embedding sees query-matchable words instead of pipes + LaTeX (table chunks
 # have no provision statement to fold, so the raw content is all math).
-_LEGIBLE_MAP = {
-    "\\geq": ">=", "\\leq": "<=", "\\ne": "!=", "\\max": "max", "\\min": "min",
+_SYM_TO_UNICODE = {
+    "\\lambda": "λ", "\\rho": "ρ", "\\phi": "φ", "\\mu": "μ",
+    "\\alpha": "α", "\\beta": "β", "\\sigma": "σ",
+    "\\geq": "≥", "\\leq": "≤", "\\ne": "≠", "\\times": "×",
+    "\\cdot": "·", "\\prime": "′", "\\max": "max", "\\min": "min",
 }
 
+
 def _math_to_text(s):
-    """Decode a LaTeX-ish math cell to readable text, e.g.
-    "$$\\left[0.17\\lambda\\sqrt{f_{c}^{\\prime}}+\\frac{N_{u}}{6A_{g}}\\right]b_{w}d$$"
-    -> "[0.17 lambda sqrt(fc') + (Nu)/(6Ag)] bw d"."""
+    """Decode a LaTeX-ish math cell to readable Unicode, e.g.
+    "$$\\lambda_s\\lambda(\\rho_w)^{1/3}\\sqrt{f_c'}$$
+    -> "λ_sλ(ρ_w)1/3√(f_c')". Subscripts keep their underscore so λ_s/ρ_w
+    stay distinct segmentable tokens (never merged into unsegmentable
+    lambdas/rhow, the KB prose λ-drop bug); superscripts (^) and braces are
+    dropped."""
     t = s.strip()
     if not t:
         return ""
@@ -151,27 +158,23 @@ def _math_to_text(s):
     # keep the bracket/paren that \left/\right point at
     t = re.sub(r"\\left\s*(.)", r"\1", t)
     t = re.sub(r"\\right\s*(.)", r"\1", t)
+    # drop braces around sub/superscripts, KEEPING the "_" of subscripts
+    # (_{s} -> _s) and flattening "^" superscripts (^{1/3} -> 1/3); doing
+    # this early lets \frac/\sqrt below see clean interiors
+    t = re.sub(r"_\{([^{}]*)\}", r"_\1", t)
+    t = re.sub(r"\^\{([^{}]*)\}\s*", r"\1 ", t)
     # \frac{X}{Y} -> (X)/(Y) — best-effort (nested braces in the numerator
     # like N_{u} defeat the non-brace group; leftover frac keywords are
     # dropped below and the tokens still carry the meaning)
     t = re.sub(r"\\frac\s*\{([^{}]*)\}\s*\{([^{}]*)\}", r"(\1)/(\2)", t)
-    # \sqrt{X} -> sqrt(X)
-    t = re.sub(r"\\sqrt\s*\{([^{}]*)\}", r"sqrt(\1)", t)
-    # sub/superscripts BEFORE braces are flattened: A_{v} -> Av, f^{\prime} -> f'
-    t = re.sub(r"\\cdot", "*", t)
-    t = re.sub(r"\\prime", "'", t)
+    # \sqrt{X} -> √(X)
+    t = re.sub(r"\\sqrt\s*\{([^{}]*)\}", r"√(\1)", t)
     t = re.sub(r"\\frac", " ", t)  # leftover fracs drop the keyword
-    t = re.sub(r"[_^]\s*\{([^{}]*)\}", r"\1", t)
-    # symbol words
-    for k, v in _LEGIBLE_MAP.items():
+    # Greek + operator words -> Unicode
+    for k, v in _SYM_TO_UNICODE.items():
         t = t.replace(k, v)
-    t = t.replace("\\lambda", "lambda").replace("\\rho", "rho") \
-        .replace("\\phi", "phi").replace("\\mu", "mu") \
-        .replace("\\alpha", "alpha").replace("\\beta", "beta") \
-        .replace("\\times", "x")
-    # leftover braces/backslashes; strip ^ but KEEP _ so subscripted symbols
-    # stay segmentable tokens (lambda_s, rho_w) instead of merging into
-    # unsegmentable "lambdas" (the KB prose λ-drop bug)
+    # leftover braces/backslashes; strip ^ but KEEP _ (subscript stays a
+    # distinct token — the KB prose λ-drop bug)
     t = t.replace("{", "").replace("}", "").replace("\\", "")
     t = t.replace("^", "")
     t = re.sub(r"\s+", " ", t).strip()
@@ -179,8 +182,11 @@ def _math_to_text(s):
 
 
 def _table_prose(content):
-    """A one-line plain-text rendition of a pipe table's rows (for retrieval)."""
-    rows = []
+    """A normalized markdown-table rendition of a pipe table's rows: each cell
+    decoded to clean Unicode via _math_to_text. This is the table's SINGLE
+    canonical representation (readable + query-matchable); the raw LaTeX pipe
+    mirror is not emitted separately (dedupe)."""
+    out = []
     for ln in content.splitlines():
         line = ln.strip()
         if not line.startswith("|"):
@@ -189,8 +195,27 @@ def _table_prose(content):
         if not cells or set(cells) <= {"", "-", ":", ":-", "-:", "---"}:
             continue  # separator row
         dec = [_math_to_text(c) for c in cells]
-        rows.append(" : ".join(x for x in dec if x))
-    return " | ".join(rows)
+        out.append("| " + " | ".join(dec) + " |")
+    return "\n".join(out)
+
+
+# Symbols table chunks use that are defined elsewhere in ACI; inlined (only
+# when the table actually uses them) so the model doesn't hunt for local
+# meaning and hedge. Keys are the decoded-token forms _math_to_text emits.
+_SYMBOL_DEFS = [
+    ("A_g", "A_g = gross area of concrete cross section"),
+    ("b_w", "b_w = web (member) width"),
+    ("b_o", "b_o = perimeter of the critical section for two-way shear"),
+    ("N_u", "N_u = factored axial force, positive for compression"),
+    ("β", "β = ratio of long to short side of the column/load area"),
+    ("α_s", "α_s = a constant depending on column location, per 22.6.5.3"),
+]
+
+
+def _inline_symbol_defs(text):
+    """Definitions for table symbols the text uses, so the chunk is locally
+    self-explanatory (else the model hedges on symbols defined elsewhere)."""
+    return [d for tok, d in _SYMBOL_DEFS if tok in text]
 
 
 def _section_key(it):
@@ -327,17 +352,20 @@ def render_markdown(items):
                     if fold:
                         break
         header_note = f"\n\n{fold}" if fold else ""
-        # the table caption is the chunk's only plain-words surface (query-
-        # matchable), so keep it above the pipe/LaTeX content
-        cap_note = f"\n\n{it['caption']}" if it.get("type") == "table" and it.get("caption") else ""
-        # plain-text rendition of the table's math so the embedding matches
-        # queries (the pipes/LaTeX alone carry almost no query words)
-        prose = ""
+        chunk = content
         if it.get("type") == "table":
+            # ONE canonical representation per table: caption + the normalized
+            # readable table (clean-Unicode cells). The raw LaTeX pipe mirror
+            # is dropped so the model never has to reconcile two copies of the
+            # same table (dedupe).
             tc = _table_prose(content)
-            if tc:
-                prose = f"\n\n{tc}"
-        body.append(f"{title}{header_note}{cap_note}{prose}\n\n{content}")
+            chunk = (f"{it['caption']}\n\n" if it.get("caption") else "") + (tc or content)
+            # inline local definitions for symbols this table actually uses
+            # (defined elsewhere in ACI) so the model stops hedging on them
+            defs = _inline_symbol_defs(chunk)
+            if defs:
+                chunk += "\n\nSymbols: " + "; ".join(defs)
+        body.append(f"{title}{header_note}\n\n{chunk}")
     return header + "\n\n".join(body) + "\n"
 
 
@@ -428,6 +456,11 @@ def _selftest():
              "chapter": None, "section": None, "source_name": "b.pdf",
              "table_number": "4.1.1", "caption": "Table 4.1.1—Cap",
              "content": "|x|y|"}))
+        (td / "b-p3-i5.json").write_text(json.dumps(
+            {"doc_id": "b", "item_id": "b-p3-i5", "page": 3, "type": "table",
+             "chapter": None, "section": None, "source_name": "b.pdf",
+             "table_number": "22.5.5.1", "caption": "Table 22.5.5.1—Vc",
+             "content": "|$$0.66\\lambda_s\\lambda(\\rho_w)^{1/3}\\sqrt{f_{c}^{\\prime}}+\\frac{N_{u}}{6A_{g}}$$|"}))
         (td / "junk.json").write_text("{corrupt")
         by_doc = docs_from_verified(td)
         assert set(by_doc) == {"a", "b"}, by_doc  # corrupt file skipped
@@ -456,14 +489,26 @@ def _selftest():
         assert _stmt_key("**R22.5.1.2** The limit on cross") is None
         md_b = render_markdown(by_doc["b"])
         # table: no section -> backfilled from table_number; caption folded in;
-        # plain-text prose rendition added (query-matchable words)
-        assert "## page 3 table — 4.1.1\n\nTable 4.1.1—Cap\n\nx : y\n\n|x|y|" in md_b, md_b
-        assert "4.1.1" in md_b and "|x|y|" in md_b
-    # subscripts survive _math_to_text: lambda_s / rho_w stay distinct tokens
-    # (regression: stripped "_" merged them into unsegmentable lambdas/rhow)
+        # the normalized (clean-Unicode) table is the single representation,
+        # no raw LaTeX pipe mirror. x:y table keeps its structure.
+        assert "## page 3 table — 4.1.1\n\nTable 4.1.1—Cap\n\n| x | y |" in md_b, md_b
+        assert "4.1.1" in md_b
+        # math-heavy table: Unicode normalize (λ_s both lambdas distinct),
+        # superscripts flattened, and inline symbol defs for A_g / N_u
+        assert "0.66λ_sλ(ρ_w)1/3" in md_b, md_b
+        assert "√(f_c′" in md_b and "(N_u)/(6A_g)" in md_b, md_b
+        assert "Symbols: A_g = gross area" in md_b and "N_u = factored axial force" in md_b, md_b
+        assert "lambdas" not in md_b and "rhow" not in md_b and "sqrt(" not in md_b, md_b
+    # subscripts survive _math_to_text (Unicode): λ_s / ρ_w stay distinct
+    # tokens — regression guard for the KB prose λ-drop bug (stripped "_"
+    # used to merge them into unsegmentable lambdas/rhow)
     m = _math_to_text("\\lambda_s\\lambda(\\rho_w)^{1/3}")
-    assert "lambda_slambda" in m and "rho_w" in m, m
-    assert "lambdas" not in m and "rhow" not in m, m
+    assert "λ_sλ" in m and "ρ_w" in m, m
+    assert "lambdas" not in m and "rhow" not in m and "sqrt" not in m, m
+    # braced subscripts (two-way Table 22.6.5.2 path) also stay segmentable
+    mb = _math_to_text("0.33\\lambda_{s}\\lambda\\sqrt{f_{c}^{\\prime}}")
+    assert "λ_sλ√(f_c′" in mb, mb
+    assert "lambdas" not in mb and "sqrt" not in mb, mb
     print("selftest: ok")
 
 

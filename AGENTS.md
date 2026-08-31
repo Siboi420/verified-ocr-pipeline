@@ -127,13 +127,17 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   starts; multiple same-key statements prefer the provision (“shall…”) over
   R-commentary (“is assumed…”); R-commentary equations and unverified
   statements stay unfolded — current ACI export: 43 eq chunks, 30 folded).
-  Table chunks get the same treatment: caption folded in above the pipe/LaTeX
-  content (the chunk's only plain-words, query-matchable surface — the
-  Table 22.5.5.1 retrieval miss was an uncaptioned table chunk), section
-  backfilled from `table_number`, AND a plain-text **prose rendition** of the
-  rows (`_table_prose`/`_math_to_text`: lambda/sqrt/rho/geq decoded,
-  subscripts flattened, frac best-effort — the LaTeX tokens alone still barely
-  match queries). (11 table chunks, all with prose.) Per-page ordering groups
+  Table chunks get the same treatment: caption stays the plain-words surface
+  (the Table 22.5.5.1 retrieval miss was an uncaptioned table chunk), section
+  backfilled from `table_number`, AND the rows are rendered as a SINGLE
+  **canonical clean-Unicode table** (each cell through `_math_to_text` → `λ_s`,
+  `ρ_w`, `√(f_c′)`, `β`, fractions `(N_u)/(6A_g)`). A table chunk emits exactly
+  ONE representation — caption + this normalized table (the raw pipe/LaTeX
+  mirror is dropped so the model never reconciles two copies of the same
+  table) — plus a `Symbols:` line inlining local definitions for whichever of
+  `A_g`/`b_w`/`b_o`/`N_u`/`β`/`α_s` that table actually uses, so the model
+  stops hedging on symbols defined elsewhere. (11 table chunks, all
+  normalized + annotated.) Per-page ordering groups
   code + R-commentary + subsections: items sort by a numeric section tuple
   (R directly beneath its code, then subsections), fragments with no section
   inherit the nearest sectioned same-page predecessor, else the previous
@@ -147,15 +151,16 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   unreadable JSON **and stale pre-metadata exports** (missing `source_name` — the
   old bbox-OCR artifacts) with warnings. `--selftest` for offline checks,
   `--dry-run` to render without uploading. Requires `UNSLOTH_API_KEY`.
-  **Prose rendition preserves subscripts:** since the λ-drop fix, `_math_to_text`
-  strips `^` but KEEPS `_`, so a subscripted symbol stays a segmentable token
-  (`\lambda_s`→`lambda_s`, `\rho_w`→`rho_w` — previously stripped to unsegmentable
-  `lambdas`/`rhow`, which made Table 22.5.5.1 row (c)'s `0.66λ_s·λ(ρw)¹ᐟ³√f'c`
-  render as `0.66lambdaslambda(rhow)1/3…` and caused qwen to drop one λ under
-  recall). `_selftest` asserts `_math_to_text("\\lambda_s\\lambda(\\rho_w)^{1/3}")`
-  contains `lambda_slambda` + `rho_w` and not `lambdas`/`rhow`. Deliberately
-  deferred: preserving `^` or adding a `*` separator (re-add only if the re-test
-  still drops a λ).
+  **Table math → clean Unicode (λ-drop fixed):** `_math_to_text` decodes
+  `\lambda_s`→`λ_s`, `\rho_w`→`ρ_w`, `\sqrt{…}`→`√(…)`, `\prime`→`′` and KEEPS
+  `_` on subscripts (both `\lambda_s` and `\lambda_{s}` → `λ_s`, `\rho_w` and
+  `\rho_{w}` → `ρ_w`), so the two λ factors in Table 22.5.5.1 row (c) and
+  Table 22.6.5.2 stay distinct — previously `_` was stripped and both merged
+  into unsegmentable `lambdas`, making qwen drop one λ under recall (their
+  `0.33λ_sλ√(f_c′)` rendered as `0.33lambdaslambdasqrtfc'`). `_selftest`
+  guards both the unbracketed and braced-subscript (two-way) paths.
+  Deliberately deferred: preserving `^` or adding a `*` separator (re-add
+  only if the re-test still drops a λ).
 - `config.py` — `API_BASE` (default `http://localhost:8888`), `API_KEY` (env-only),
   `MODEL = "ggml-org/GLM-OCR-GGUF"`, `UPLOAD_DIR`.
 - `ocr_engine.py` — `pdf_to_images(dpi=200, page_range=None)` (accepts a single
@@ -275,11 +280,15 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   (rag_uploader backfills the section from the eq key and folds the provision
   statement into equation chunks — applies to the existing verified set, no
   re-OCR: current ACI export backfills 11 eq sections, folds 3 statements).
-- **KB prose subscripts preserved (resolved):** `_math_to_text` no longer strips
-  `_`; `lambda_s`/`rho_w` stay segmentable tokens, fixing the qwen λ-drop in
-  Table 22.5.5.1 row (c). Re-uploaded to the "Verified OCR" KB (83 chunks),
-  old buggy copy deleted. `^`/separator preservation left out (deferred);
-  pending: re-run the qwen query to confirm both λ factors appear.
+- **KB table chunks → clean Unicode, deduped, self-contained (resolved):**
+  `_math_to_text` no longer strips `_` and emits `λ_s`/`ρ_w`/`√(f_c′)`
+  (both `\lambda_s` and `\lambda_{s}` keep their `_`), fixing the qwen λ-drop
+  in Table 22.5.5.1 (c) and Table 22.6.5.2. Table chunks now emit ONE canonical
+  representation (caption + normalized Unicode table; raw LaTeX mirror
+  dropped) plus inline `Symbols:` definitions for `A_g`/`b_w`/`b_o`/`N_u`/`β`/`α_s`.
+  Pending: re-upload to the "Verified OCR" KB and re-run the qwen query to
+  confirm both λ factors appear and the duplicate-content / mangled-math /
+  missing-definitions hedge class is gone.
 - Equation keys are edited via dedicated eq-number/eq-letters inputs in the
   Edit + Accept editor and are never auto-re-derived on accept (None = untouched,
   "" = cleared). The draw-box has a type selector (`bboxType`, auto default;
