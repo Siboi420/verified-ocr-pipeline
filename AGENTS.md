@@ -147,6 +147,15 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   unreadable JSON **and stale pre-metadata exports** (missing `source_name` — the
   old bbox-OCR artifacts) with warnings. `--selftest` for offline checks,
   `--dry-run` to render without uploading. Requires `UNSLOTH_API_KEY`.
+  **Prose rendition preserves subscripts:** since the λ-drop fix, `_math_to_text`
+  strips `^` but KEEPS `_`, so a subscripted symbol stays a segmentable token
+  (`\lambda_s`→`lambda_s`, `\rho_w`→`rho_w` — previously stripped to unsegmentable
+  `lambdas`/`rhow`, which made Table 22.5.5.1 row (c)'s `0.66λ_s·λ(ρw)¹ᐟ³√f'c`
+  render as `0.66lambdaslambda(rhow)1/3…` and caused qwen to drop one λ under
+  recall). `_selftest` asserts `_math_to_text("\\lambda_s\\lambda(\\rho_w)^{1/3}")`
+  contains `lambda_slambda` + `rho_w` and not `lambdas`/`rhow`. Deliberately
+  deferred: preserving `^` or adding a `*` separator (re-add only if the re-test
+  still drops a λ).
 - `config.py` — `API_BASE` (default `http://localhost:8888`), `API_KEY` (env-only),
   `MODEL = "ggml-org/GLM-OCR-GGUF"`, `UPLOAD_DIR`.
 - `ocr_engine.py` — `pdf_to_images(dpi=200, page_range=None)` (accepts a single
@@ -266,6 +275,11 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   (rag_uploader backfills the section from the eq key and folds the provision
   statement into equation chunks — applies to the existing verified set, no
   re-OCR: current ACI export backfills 11 eq sections, folds 3 statements).
+- **KB prose subscripts preserved (resolved):** `_math_to_text` no longer strips
+  `_`; `lambda_s`/`rho_w` stay segmentable tokens, fixing the qwen λ-drop in
+  Table 22.5.5.1 row (c). Re-uploaded to the "Verified OCR" KB (83 chunks),
+  old buggy copy deleted. `^`/separator preservation left out (deferred);
+  pending: re-run the qwen query to confirm both λ factors appear.
 - Equation keys are edited via dedicated eq-number/eq-letters inputs in the
   Edit + Accept editor and are never auto-re-derived on accept (None = untouched,
   "" = cleared). The draw-box has a type selector (`bboxType`, auto default;

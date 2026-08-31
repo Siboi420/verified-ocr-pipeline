@@ -169,9 +169,11 @@ def _math_to_text(s):
         .replace("\\phi", "phi").replace("\\mu", "mu") \
         .replace("\\alpha", "alpha").replace("\\beta", "beta") \
         .replace("\\times", "x")
-    # leftover braces/backslashes
+    # leftover braces/backslashes; strip ^ but KEEP _ so subscripted symbols
+    # stay segmentable tokens (lambda_s, rho_w) instead of merging into
+    # unsegmentable "lambdas" (the KB prose λ-drop bug)
     t = t.replace("{", "").replace("}", "").replace("\\", "")
-    t = t.replace("^", "").replace("_", "")
+    t = t.replace("^", "")
     t = re.sub(r"\s+", " ", t).strip()
     return t
 
@@ -457,6 +459,11 @@ def _selftest():
         # plain-text prose rendition added (query-matchable words)
         assert "## page 3 table — 4.1.1\n\nTable 4.1.1—Cap\n\nx : y\n\n|x|y|" in md_b, md_b
         assert "4.1.1" in md_b and "|x|y|" in md_b
+    # subscripts survive _math_to_text: lambda_s / rho_w stay distinct tokens
+    # (regression: stripped "_" merged them into unsegmentable lambdas/rhow)
+    m = _math_to_text("\\lambda_s\\lambda(\\rho_w)^{1/3}")
+    assert "lambda_slambda" in m and "rho_w" in m, m
+    assert "lambdas" not in m and "rhow" not in m, m
     print("selftest: ok")
 
 
