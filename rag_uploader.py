@@ -128,6 +128,11 @@ def _item_order(it):
         return 0
 
 
+def _item_id(it):
+    """Stable identity for sort-meta maps (verified exports carry item_id)."""
+    return it.get("item_id") or it.get("id")
+
+
 # Plain-text decoding for table cells: a small ACI-domain renderer so the
 # embedding sees query-matchable words instead of pipes + LaTeX (table chunks
 # have no provision statement to fold, so the raw content is all math).
@@ -186,6 +191,44 @@ def _table_prose(content):
     return " | ".join(rows)
 
 
+def _section_key(it):
+    """The section key an item belongs to, for ordering:
+    stamped section -> equation key -> table number -> statement marker ->
+    chapter (weak fallback). None if none apply."""
+    if it.get("section"):
+        return it["section"]
+    if it.get("type") == "equation" and it.get("eq_num"):
+        return _eq_section(it["eq_num"])
+    if it.get("type") == "table" and it.get("table_number"):
+        return it["table_number"]
+    k = _stmt_key(it.get("content") or "")
+    if k:
+        return k
+    if it.get("chapter"):
+        return it["chapter"]
+    return None
+
+
+def _sort_tuple(sec):
+    """(numeric_tuple, is_R) from a section key: "R22.5.6.3.1a" ->
+    ((22,5,6,3,1), True). Trailing letters stripped (eq/table sub-suffixes);
+    unparseable -> ((), is_R) so it lands in its R/code tail."""
+    s = (sec or "").strip()
+    is_r = s.startswith("R")
+    s = s.lstrip("R").strip()
+    s = re.sub(r"[A-Za-z]+$", "", s)
+    try:
+        return tuple(int(x) for x in s.split(".") if x != ""), is_r
+    except ValueError:
+        return (), is_r
+
+
+def _page_order(items):
+    """Per-page document order: the numeric index of item_id ("…-p404-i2" -> 2).
+    bbox-added items (no index) keep append order (stable)."""
+    return sorted(items, key=_item_order)
+
+
 def render_markdown(items):
     """One markdown doc per source file. Empty content (boilerplate-only
     items are skipped) is skipped — nothing to index. Equations get
@@ -215,7 +258,41 @@ def render_markdown(items):
                 if prev is None or _statement_score(text) > _statement_score(prev):
                     pg[key] = text
     body = []
-    for it in sorted(items, key=lambda x: (x["page"], _item_order(x))):
+    # Per-page ordering: each item gets a (numeric_tuple, is_R) sort anchor,
+    # inherited from its nearest sectioned same-page predecessor, else from
+    # the previous page's last sectioned item (continuation fragments like
+    # "where …" / "Notes: …" often start a page under a parent that ended
+    # above). True orphans (nothing to inherit) sort to the page tail. Within
+    # a section: code, then its R-commentary, then subsections — so R lands
+    # directly beneath the section it explains.
+    sort_meta = {}
+    last_page_key = None
+    for pg in sorted({it["page"] for it in items}):
+        page_items = _page_order([it for it in items if it["page"] == pg])
+        prev_key = last_page_key
+        seen = None
+        for it in page_items:
+            k = _section_key(it)
+            if k:
+                t = _sort_tuple(k)
+                sort_meta[_item_id(it)] = t
+                seen = prev_key = t
+            elif seen:  # same-page fragment: rides with the last section
+                sort_meta[_item_id(it)] = seen
+            elif prev_key:  # continuation from the previous page
+                sort_meta[_item_id(it)] = prev_key
+            else:
+                sort_meta[_item_id(it)] = None
+        last_page_key = prev_key
+
+    def _render_key(it):
+        t = sort_meta.get(_item_id(it))
+        if t is None:
+            return (1, (), False, _item_order(it))  # keyless -> page tail
+        numt, is_r = t
+        return (0, numt, is_r, _item_order(it))
+
+    for it in sorted(items, key=lambda x: (x["page"], _render_key(x))):
         content = (it.get("content") or "").strip()
         if not content:
             continue
@@ -232,6 +309,8 @@ def render_markdown(items):
             sec = _eq_section(it.get("eq_num"))
         if sec is None and it.get("type") == "table" and it.get("table_number"):
             sec = it["table_number"]
+        if sec is None and it.get("type") == "text":
+            sec = _stmt_key(content)  # bold-marker statements sort by this too
         if sec:
             title += f" — {sec}"
         fold = ""
@@ -320,6 +399,28 @@ def _selftest():
             {"doc_id": "a", "item_id": "a-p1-i8", "page": 1, "type": "equation",
              "chapter": None, "section": None, "source_name": "a.pdf",
              "eq_num": "22.5.6.3.1c", "content": "V_{ci} = 0.17\\lambda \\sqrt{f'_c}b_wd"}))
+        # page 2: code section, its R-commentary, a section-less fragment that
+        # must inherit the R (same-page predecessor), and a subsection
+        (td / "a-p2-i9.json").write_text(json.dumps(
+            {"doc_id": "a", "item_id": "a-p2-i9", "page": 2, "type": "text",
+             "chapter": None, "section": "22.5.4", "source_name": "a.pdf",
+             "content": "22.5.4 Composite concrete members"}))
+        (td / "a-p2-i10.json").write_text(json.dumps(
+            {"doc_id": "a", "item_id": "a-p2-i10", "page": 2, "type": "text",
+             "chapter": None, "section": "R22.5.4", "source_name": "a.pdf",
+             "content": "R22.5.4 Composite concrete members commentary"}))
+        (td / "a-p2-i11.json").write_text(json.dumps(
+            {"doc_id": "a", "item_id": "a-p2-i11", "page": 2, "type": "text",
+             "chapter": None, "section": None, "source_name": "a.pdf",
+             "content": "This fragment continues the commentary."}))
+        (td / "a-p2-i12.json").write_text(json.dumps(
+            {"doc_id": "a", "item_id": "a-p2-i12", "page": 2, "type": "text",
+             "chapter": None, "section": "22.5.4.1", "source_name": "a.pdf",
+             "content": "22.5.4.1 shall apply to separate placements."}))
+        (td / "a-p2-i13.json").write_text(json.dumps(
+            {"doc_id": "a", "item_id": "a-p2-i13", "page": 2, "type": "text",
+             "chapter": None, "section": "R22.5.4.1", "source_name": "a.pdf",
+             "content": "R22.5.4.1 The scope includes composite members."}))
         (td / "b-p3-i4.json").write_text(json.dumps(
             {"doc_id": "b", "item_id": "b-p3-i4", "page": 3, "type": "table",
              "chapter": None, "section": None, "source_name": "b.pdf",
@@ -339,6 +440,15 @@ def _selftest():
         assert _eq_parent("22.1") == "22"
 
         assert _eq_section("22.5.6.3.1a") == "22.5.6.3.1" and _eq_section("R22.5.6.2") == "R22.5.6.2"
+        # per-page ordering: code, then its R, then the subsection (R directly
+        # beneath its code), and a section-less fragment rides with the R it
+        # follows in document order
+        frame = [x.split("\n\n")[0] for x in md_a.split("## ") if x]
+        p2 = [x for x in frame if x.startswith("page 2 ")]
+        # order: code 22.5.4 -> R22.5.4 -> fragment (title has no section, but
+        # sorts under R22.5.4) -> 22.5.4.1 -> R22.5.4.1
+        tails = [t.rsplit(" — ", 1)[-1] if " — " in t else "" for t in p2]
+        assert tails == ["22.5.4", "R22.5.4", "", "22.5.4.1", "R22.5.4.1"], p2
         assert _eq_section(None) is None and _eq_section("") is None
         # R-commentary has no key, so _stmt_key returns None for it
         assert _stmt_key("**R22.5.1.2** The limit on cross") is None

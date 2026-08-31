@@ -133,7 +133,13 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   backfilled from `table_number`, AND a plain-text **prose rendition** of the
   rows (`_table_prose`/`_math_to_text`: lambda/sqrt/rho/geq decoded,
   subscripts flattened, frac best-effort — the LaTeX tokens alone still barely
-  match queries). (11 table chunks, all with prose.) Items
+  match queries). (11 table chunks, all with prose.) Per-page ordering groups
+  code + R-commentary + subsections: items sort by a numeric section tuple
+  (R directly beneath its code, then subsections), fragments with no section
+  inherit the nearest sectioned same-page predecessor, else the previous
+  page's last section (continuation fragments like "where …"/"Notes: …"
+  across page boundaries), and true orphans sort to the page tail; bold-marker
+  statement titles also get their number via `_stmt_key`. Items
   order by the numeric index of `item_id` (lexical sort put i10
   before i2)
   and uploads to an Unsloth Studio RAG KB (`/api/rag/knowledge-bases`, name via
