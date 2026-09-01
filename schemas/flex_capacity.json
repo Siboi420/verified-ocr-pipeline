@@ -1,16 +1,18 @@
 {
   "name": "flex_capacity",
-  "description": "Nominal and design flexural capacity of a singly reinforced rectangular section. a = A_s·f_y/(0.85·f'c·b), c = a/β₁, ε_t = 0.003·(d−c)/c, M_n = A_s·f_y·(d−a/2), φ from Table 21.2.2. Assumes tension steel yields. Returns M_n_kNm, phiM_n_kNm, a_mm, c_mm, beta_1, epsilon_t, phi, A_s_mm2.",
+  "description": "Nominal and design flexural capacity of a singly reinforced rectangular section. Effective depth: pass d, or pass h plus cover_cg (d = h - cover_cg) — e.g. a 200x300 beam -> b=200 and h=300 with cover_cg (never pass total height h as d). a = A_s·f_y/(0.85·f'c·b), c = a/β₁, ε_t = 0.003·(d−c)/c, M_n = A_s·f_y·(d−a/2), φ from Table 21.2.2. Assumes tension steel yields. Returns M_n_kNm, phiM_n_kNm, a_mm, c_mm, beta_1, epsilon_t, phi, A_s_mm2.",
   "parameters": {
     "type": "object",
     "properties": {
       "b": {"type": "number", "description": "Beam width (mm)", "exclusiveMinimum": 0},
-      "d": {"type": "number", "description": "Effective depth (mm)", "exclusiveMinimum": 0},
+      "d": {"type": "number", "description": "Effective depth (mm); or pass h with cover_cg instead", "exclusiveMinimum": 0, "default": null},
       "A_s": {"type": "number", "description": "Tension steel area (mm²)", "exclusiveMinimum": 0},
       "f_c": {"type": "number", "description": "Concrete compressive strength f'c (MPa)", "exclusiveMinimum": 0},
-      "f_yl": {"type": "number", "description": "Longitudinal steel yield strength (MPa)", "exclusiveMinimum": 0}
+      "f_yl": {"type": "number", "description": "Longitudinal steel yield strength (MPa)", "exclusiveMinimum": 0},
+      "h": {"type": "number", "description": "Total section depth (mm); give with cover_cg to compute d = h - cover_cg", "exclusiveMinimum": 0, "default": null},
+      "cover_cg": {"type": "number", "description": "Distance (mm) from extreme tension fiber to centroid of tension reinforcement", "exclusiveMinimum": 0, "default": null}
     },
-    "required": ["b", "d", "A_s", "f_c", "f_yl"],
+    "required": ["b", "A_s", "f_c", "f_yl"],
     "additionalProperties": false
   },
   "output": {

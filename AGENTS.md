@@ -215,7 +215,9 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   `<tool_call>`-marker fallback (Qwen marker format) — the marker regex only ever
   fires if the backend stops emitting the native shape (verified native-only
   2026-09-02). System prompt is the `docs/infrastructure.md` guardrails (no
-  arithmetic from memory, cite sources, flag uncertainty). Verified end-to-end:
+  arithmetic from memory, cite sources, flag uncertainty) plus a b×h note:
+  sections like "200x300" are b×h — capacity tools take d, or h with
+  `cover_cg` (d = h − cover_cg), never total height h as d. Verified end-to-end:
   a wrong first call (`shear_capacity` with `d=0`) was rejected, the model
   course-corrected to `min_shear_reinf(b_w=350, f_c=28, f_yt=420)` →
   `291.67 mm²/m`, then answered from the tool result.
@@ -313,10 +315,10 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   verified/rejected copies are removed.
 - `validation/` — `pending/` (docs), `verified/`, `rejected/` (per-item JSON), `uploads/<doc_id>/` (pdf, md, page PNGs).
 - `functions/beam_calc.py` — self-contained, **stdlib-only** (math; numpy/matplotlib/argparse/yaml dropped) ACI 318M-19 beam shear/flexure calcs extracted from the BeamValidation repo
-  (github.com/Siboi420/BeamValidation, commit `668be3670dc8ba065f215a0ca1b59eb9e3bd8ca5`, `scripts/RCBeam_moment_capacity.py`). Public: `min_shear_reinf(b_w, f_c, f_yt)` → Av,min per metre (mm²/m, §9.6.3.3, `max(0.062·√f'c·b_w/f_yt, 0.35·b_w/f_yt)·1000`); `shear_capacity(...)` → wrapped `compute_aci_shear` (simplified Vc §22.5.5.1(a) unless A_s+V_u+M_u given, then detailed (b) capped §22.5.8.5.3; φ_v=0.75); `flex_capacity(...)` → wrapped `compute_aci_flexure` (stress block §22.2.2.1, β₁ §22.2.2.4.3, φ Table 21.2.2). Constants EPSILON_CU=0.003, Es=2e5, λ=1.0. The 318-19 size-effect Vc Eq (c) is NOT implemented (noted in schema basis — no fabricated coverage).
+  (github.com/Siboi420/BeamValidation, commit `668be3670dc8ba065f215a0ca1b59eb9e3bd8ca5`, `scripts/RCBeam_moment_capacity.py`). Public: `min_shear_reinf(b_w, f_c, f_yt)` → Av,min per metre (mm²/m, §9.6.3.3, `max(0.062·√f'c·b_w/f_yt, 0.35·b_w/f_yt)·1000`); `shear_capacity(b, d=None, f_c=None, A_v=0, s=0, f_yw=0, A_s=None, V_u=None, M_u=None, h=None, cover_cg=None)` → wrapped `compute_aci_shear` — effective depth is **d, or h with cover_cg (d = h − cover_cg), never both (loud XOR ValueError), rejected cover_cg ≥ h**, Vc rows: simplified `§22.5.5.1(a)`; detailed `(b)` only when stirrups ≥ Av,min AND A_s+V_u+M_u given, capped `§22.5.8.5.3`-adjacent `0.29·λ·√f'c·b·d`; **size-effect `(c)` when stirrups < Av,min (or absent) and A_s given: `λ_s = min(√(2/(1+d/250)), 1)` (§22.5.5.1.3), `V_c = 0.66·λ_s·λ·ρ_w^⅓·√f'c·b·d`**; Av,min comparison via `min_shear_reinf(b, f_c, f_yw)·s/1000` (reused, not duplicated); stirrups adequate ⇔ that inequality; φ_v=0.75; returns `Vc_criterion` ("row (a)"|"row (b)"|"row (c)") + `lambda_s` on top of the numeric keys; `flex_capacity(b, d=None, A_s=None, f_c=None, f_yl=None, h=None, cover_cg=None)` → wrapped `compute_aci_flexure` (stress block §22.2.2.1, β₁ §22.2.2.4.3, φ Table 21.2.2), same d/h XOR path. Constants EPSILON_CU=0.003, Es=2e5, λ=1.0.
 - `functions/wrapper.py` — schema-driven dispatcher (`call_tool(name, **kwargs)` → `{value, unit, basis}`; registry maps the 3 tool names; loads the matching `schemas/<name>.json` resolved via `__file__`; validates required fields, unknown keys, numeric type/finiteness, exclusiveMinimum/minimum bounds; raises `ValueError` with a clear message). Schema read/parse errors (missing file, bad JSON) are wrapped as `ValueError`.
-- `functions/test_shear_tools.py` — plain asserts + PASS/FAIL (no framework), 11 checks over all three tools + wrapper shape/unit/basis + validation error paths (missing/negative/non-numeric/unknown-key/unknown-tool); exits non-zero on failure. Loads sibling modules via `importlib` so it runs from any cwd.
-- `schemas/min_shear_reinf.json`, `schemas/shear_capacity.json`, `schemas/flex_capacity.json` — OpenAI function-calling shape (`name`/`description`/`parameters` with `type`/`properties`/`required`/`additionalProperties:false`) plus an `output` block carrying `unit` + `basis` (returned by wrapper).
+- `functions/test_shear_tools.py` — plain asserts + PASS/FAIL (no framework), 19 checks over all three tools + wrapper shape/unit/basis + d/h resolution + validation error paths (missing/negative/non-numeric/unknown-key/unknown-tool); exits non-zero on failure. Loads sibling modules via `importlib` so it runs from any cwd.
+- `schemas/min_shear_reinf.json`, `schemas/shear_capacity.json`, `schemas/flex_capacity.json` — OpenAI function-calling shape (`name`/`description`/`parameters` with `type`/`properties`/`required`/`additionalProperties:false`) plus an `output` block carrying `unit` + `basis` (returned by wrapper). `d` is **optional** on the two capacity schemas (default null); `h` + `cover_cg` are optional fields resolving to d; capacity `description`s carry the few-shot line ("a 200x300 beam → pass b=200 and (d, or h=300 with cover_cg)"), `min_shear_reinf`'s a b_w-only variant; `shear_capacity` `basis` names row (c) + §22.5.5.1.3 λ_s.
 
 ## Current state (verified facts — don't contradict)
 
@@ -340,6 +342,7 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   doesn't extract; investigation was in progress (GLM-OCR directed at page 1 returns only
   the cost table). Not resolved.
 - Jobs dict is in-memory (restart loses jobs). `UNSLOTH_API_KEY` is required.
+- **Beam tools rows (a)/(b)/(c) (implemented 2026-09-02):** trigger semantics — `shear_capacity` reads stirrup adequacy as `A_v ≥ min_shear_reinf(b, f_c, f_yw)·s/1000`; adequate → rows (a)/(b) with `lambda_s = 1.0`; inadequate/absent + `A_s` → **row (c)** size-effect (`λ_s = min(√(2/(1+d/250)), 1)` — note d in mm, caps at 1.0 for d ≤ 250, so d=240 gives λ_s=1.0 not 0.9897); no stirrups + no `A_s` → row (a) fallback. `Vc_criterion`/`lambda_s` are additive return keys. Both capacity tools take d XOR (h+cover_cg) with loud errors for both/neither/cover≥h.
 - **Eq-key/section context (resolved):** ACI pages where GLM-OCR bolds
   provision markers (`**22.5.1.2**`) previously stamped `section=None` on every
   item of that page (e.g. the whole of page 404), so equation chunks lacked a
@@ -386,7 +389,7 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
 ## Tests / verification
 
 - `python3 test_itemizer.py` — 68 itemizer assertions.
-- `python3 functions/test_shear_tools.py` — 11 hand-calc checks for the `functions/` shear/flexure tools (Av,min mm²/m, simplified Vc, flexure M_n/φ, wrapper shape + unit/basis, validation error paths); plain asserts + PASS/FAIL, exit non-zero on failure.
+- `python3 functions/test_shear_tools.py` — 19 hand-calc checks for the `functions/` shear/flexure tools (Av,min mm²/m, simplified Vc, row (c) size-effect Vc incl. λ_s + ρ_w, adequate-stirrup rows (a)/(b), partial stirrups → row (c) + V_s, d↔h/cover_cg equivalence for shear and flex, d-resolution errors (XOR/neither/cover≥h), row (a) fallback, wrapper shape + unit/basis incl. h-path, validation error paths); plain asserts + PASS/FAIL, exit non-zero on failure.
 - `python3 smoke_test.py` — 132 end-to-end checks via Flask test client (no live OCR;
   asserts `?ocr=1` redirect, no-key OCR error, `parse_page_range`/`parse_page_ranges`
   valid+invalid forms, `ocr_pages` storage incl. multiple ranges, invalid -> 400,

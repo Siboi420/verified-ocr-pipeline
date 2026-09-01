@@ -42,7 +42,9 @@ SYSTEM_PROMPT = (
     "call the tool for any calculation. Cite every source from the context "
     "when you use it. Flag uncertainty if the input is ambiguous. No "
     "engineering judgment - redirect to an engineer. No data fabrication - "
-    "if something is not in your sources, say so."
+    "if something is not in your sources, say so. Sections sized as \"200x300\" "
+    "are b x h. Capacity tools take effective depth d, or h plus `cover_cg` "
+    "(d = h - cover_cg); never pass total height h as d."
 )
 
 # Qwen marker-format tool call: <tool_call>{"name": ..., "arguments": {...}}</tool_call>
