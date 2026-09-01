@@ -88,6 +88,54 @@ def parse_and_persist(doc):
     return doc
 
 
+PAGE_SEP = re.compile(r"^--- Page (\d+) ---\s*$")
+
+
+def merge_ocr_markdown(existing_md, new_md):
+    """Merge freshly OCR'd pages into existing markdown (incremental OCR).
+
+    existing_md: current document markdown (kept intact for unlisted pages).
+    new_md:      assemble_markdown output for the new pages only (no header).
+    Returns the full document: the leading `# OCR: …` header preserved, page
+    blocks keyed by page number merged (new blocks replace same-numbered old
+    ones), reassembled in ascending page order. Callers pass only pages that
+    are genuinely new (the route subtracts covered pages) so in practice
+    nothing existing gets replaced.
+    """
+    def split(md):
+        header = ""
+        blocks = {}
+        page, buf = None, []
+        for line in md.splitlines():
+            m = PAGE_SEP.match(line)
+            if m:
+                try:
+                    n = int(m.group(1))
+                except ValueError:  # unreachable (regex digits); parity with itemizer
+                    buf.append(line)
+                    continue
+                if page is not None:
+                    blocks[page] = "\n".join(buf).strip()
+                elif buf:
+                    header = "\n".join(buf).strip()
+                page, buf = n, []
+            else:
+                buf.append(line)
+        if page is not None:
+            blocks[page] = "\n".join(buf).strip()
+        elif buf:
+            header = header or "\n".join(buf).strip()
+        return header, blocks
+
+    header, blocks = split(existing_md)
+    _, new_blocks = split(new_md)
+    blocks.update(new_blocks)
+    parts = [header] if header else []
+    for pg in sorted(blocks):
+        parts.append(f"\n--- Page {pg} ---\n{blocks[pg]}")
+    return "\n".join(parts)
+
+
 def _target_page(doc, page):
     """Get (creating if needed) the page dict for a page number."""
     target = next((p for p in doc.get("pages", []) if p["page"] == page), None)
@@ -326,20 +374,41 @@ def start_ocr(doc_id):
     if doc is None:
         abort(404)
         return
-    if doc.get("pages"):
-        abort(400, "document already has parsed markdown")
+    has_items = any(p.get("items") for p in (doc.get("pages") or []))
+    if not has_items:
+        # Fresh doc: full-file OCR (page_range honors stored ocr_pages).
+        job_id = uuid.uuid4().hex[:12]
+        JOBS[job_id] = {"status": "running", "done": 0, "total": 0}
+        threading.Thread(target=_run_ocr, args=(job_id, doc), daemon=True).start()
+        return jsonify({"job_id": job_id})
+
+    # Already has items: incremental OCR — a range is required, and only
+    # pages not covered yet are OCR'd (skip, never replace).
+    data = request.get_json(silent=True) or {}
+    pages_raw = str(data.get("ocr_pages") or request.form.get("ocr_pages", "")).strip()
+    requested = parse_page_ranges(pages_raw)
+    if requested is None:
+        abort(400, "already OCR'd: pass ocr_pages to add pages (e.g. \"5-15\" or \"2-3, 4-9\")")
+    n_pages = doc.get("n_pages") or page_count(Path(doc["pdf_path"]))
+    wanted = sorted({p for s, e in requested for p in range(max(1, s), min(n_pages, e) + 1)})
+    covered = {p["page"] for p in doc.get("pages", []) if p.get("items")}
+    new_pages = [p for p in wanted if p not in covered]
+    if not new_pages:
+        abort(400, "all requested pages already OCR'd")
     job_id = uuid.uuid4().hex[:12]
     JOBS[job_id] = {"status": "running", "done": 0, "total": 0}
-    threading.Thread(target=_run_ocr, args=(job_id, doc), daemon=True).start()
-    return jsonify({"job_id": job_id})
+    threading.Thread(target=_run_ocr, args=(job_id, doc, new_pages), daemon=True).start()
+    return jsonify({"job_id": job_id, "skipped": len(wanted) - len(new_pages)})
 
 
-def _run_ocr(job_id, doc):
+def _run_ocr(job_id, doc, page_range=None):
     try:
         if not config.API_KEY:
             raise RuntimeError("UNSLOTH_API_KEY not set: set it to run GLM-OCR")
         pdf = Path(doc["pdf_path"])
-        images, tmpdir = pdf_to_images(pdf, page_range=doc.get("ocr_pages"))
+        images, tmpdir = pdf_to_images(
+            pdf, page_range=page_range if page_range is not None else doc.get("ocr_pages")
+        )
         if not images:
             raise RuntimeError(
                 f"no pages match the OCR page range (PDF has {page_count(pdf)} pages)"
@@ -362,7 +431,15 @@ def _run_ocr(job_id, doc):
                 os.rmdir(tmpdir)
             except OSError:
                 pass
-        markdown = assemble_markdown(results, source_name=doc["source_name"])
+        if page_range is not None:
+            # Incremental merge: keep existing pages verbatim, add the new ones.
+            md_path = Path(doc["md_path"])
+            existing = md_path.read_text() if md_path.exists() else ""
+            new_md = assemble_markdown(results, source_name="")
+            markdown = merge_ocr_markdown(existing, new_md) if existing.strip() else \
+                assemble_markdown(results, source_name=doc["source_name"])
+        else:
+            markdown = assemble_markdown(results, source_name=doc["source_name"])
         Path(doc["md_path"]).write_text(markdown)
         parse_and_persist(load_doc(doc["doc_id"]))  # fresh dict -> pages
         JOBS[job_id]["status"] = "done"

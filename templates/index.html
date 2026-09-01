@@ -62,7 +62,10 @@ window.MathJax = {tex: {inlineMath: [["\\(", "\\)"], ["$", "$"]]}};
   <h1>OCR Validation</h1>
   {% if doc %}<span class="pill">{{ doc.source_name }}</span>
   <span class="muted" id="counter"></span>
-  <span class="muted" id="ocrCoverage"></span>{% endif %}
+  <span class="muted" id="ocrCoverage"></span>
+  <label class="muted">OCR more:
+    <input id="ocrMorePages" size="6" placeholder="e.g. 5-15"></label>
+  <button id="ocrMoreBtn">OCR more pages</button>{% endif %}
 </header>
 
 {% if doc %}
@@ -205,6 +208,29 @@ const autoOcr = async () => {
 // /doc/<id> link never triggers OCR even if the doc has no items.
 const needsOcr = new URLSearchParams(window.location.search).get("ocr") === "1";
 if (needsOcr) autoOcr();
+
+const ocrMore = async () => {
+  const bar = document.getElementById("ocrbar");
+  if (!bar) return;
+  const pages = document.getElementById("ocrMorePages").value.trim();
+  if (!pages) {
+    bar.style.display = "block";
+    bar.textContent = "Enter pages to OCR (e.g. 5-15 or 2-3, 4-9)";
+    return;
+  }
+  try {
+    bar.style.display = "block";
+    bar.textContent = "OCR in progress…";
+    const {job_id, skipped} = await post(`/ocr/${DOC.doc_id}`, {ocr_pages: pages});
+    if (skipped) bar.textContent = `Skipping ${skipped} already-OCR'd page(s)…`;
+    await pollJob(job_id, () => location.reload(), st => {
+      bar.textContent = `OCR in progress… ${st.done}/${st.total} pages`;
+    });
+  } catch (e) {
+    bar.style.display = "block";
+    bar.textContent = "OCR failed: " + e.message;
+  }
+};
 {% else %}
 const DOC = null;
 const DOCS = {{ docs | tojson }};
@@ -774,6 +800,7 @@ document.getElementById("bulkAcceptMath").addEventListener("click", () => bulkBy
 document.getElementById("bulkAcceptText").addEventListener("click", () => bulkByType("accept", "text"));
 document.getElementById("bulkRejectMath").addEventListener("click", () => bulkByType("reject", "math"));
 document.getElementById("bulkRejectText").addEventListener("click", () => bulkByType("reject", "text"));
+document.getElementById("ocrMoreBtn").addEventListener("click", ocrMore);
 
 async function bulkByType(action, kind) {
   const final = action === "accept" ? "verified" : "rejected";

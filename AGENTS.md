@@ -33,7 +33,9 @@ Two things live here:
    verified JSON.
 2. **Supporting tooling** — `ocr_engine.py` (GLM-OCR client), `itemizer.py` (OCR
    markdown → review items), `rag_uploader.py` (verified JSON → Unsloth RAG KB),
-   config, schemas (empty), docs.
+   config, schemas (empty), docs (`docs/rag-query-guidance.md` = how to query the
+   KB for table/formula questions; `docs/infrastructure.md`, `docs/corrections.md`,
+   `docs/ocr-fix-context.md`).
 
 Related but separate: `~/Projects/StructuralEngineeringWorkspace/` (OpenSeesPy research,
 has its own AGENTS.md). This app is the human-review step feeding that research.
@@ -63,6 +65,14 @@ has its own AGENTS.md). This app is the human-review step feeding that research.
     llama.cpp build (WSL2 RTX 2080 Ti 11GB, `/dev/dxg`). GPU offload verified
     (100% util, ~2.6s/inference vs 10-15s CPU).
 - **WSL2, RTX 2080 Ti 11GB**, Python 3, Flask, PyMuPDF. Deps in `requirements-ocr.txt`.
+- **Querying the KB**: `POST /api/rag/search` defaults to `mode:"hybrid"` (BM25+dense),
+  `top_k` 1-50 (default 10), `min_score` filters the dense component (default 0.0);
+  the chat path declares a `search_knowledge_base` tool + `enable_tools: true` and
+  passes `rag_scope` (`kb_id`, `mode`, `default_top_k`, `autoinject`) — bare
+  `rag_scope` without the tool injects NOTHING (verified: prompt stayed 117 tokens
+  and the model hallucinated a formula). For table/formula questions: hybrid +
+  `top_k: 10` + branch-first prompt instruction + provenance headers. Recipes and
+  verified shapes: `docs/rag-query-guidance.md`.
 
 ## Architecture / data flow
 
@@ -83,9 +93,22 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   (`N`, `N-M`, or comma-separated like `2-3, 4-9`, 1-indexed; invalid -> 400) and
   stores `doc["ocr_pages"]` as a list of `[start, end]` pairs (e.g. `[[2,3],[4,9]]`;
   legacy flat `[5,10]` still accepted) only in the no-markdown branch (md uploads
-  ignore the field). `_run_ocr` passes the stored value straight to `pdf_to_images`
+  ignore the field). `_run_ocr(page_range=None)` passes the stored value straight to
+  `pdf_to_images`
   (clamps, merges), errors clearly if zero pages match, and pushes `done`/`total`
-  into the job dict via `ocr_batch(on_progress=...)`. bbox/caption routes parse box
+  into the job dict via `ocr_batch(on_progress=...)`. `/ocr/<doc_id>` on a doc with
+  items is **incremental OCR**: it requires `ocr_pages` in the JSON body (form field
+  fallback; same grammar as upload; invalid -> 400) and behaves as "skip, never
+  replace" — wanted pages are expanded (clamped to `n_pages`), already-covered
+  pages (`pages` with items) are subtracted, only genuinely new pages run through
+  `_run_ocr(page_range=new_pages)` which **merges** the fresh blocks into the
+  existing `--- Page N ---` markdown via `merge_ocr_markdown` (leading `# OCR:`
+  header kept, page blocks updated by number, reassembled ascending; a doc with no
+  existing md content falls back to a fresh full `assemble_markdown`). Response is
+  `{job_id, skipped}` (skipped = wanted-count minus new). Fully-covered or empty-
+  after-clamp ranges -> 400 ("all requested pages already OCR'd") with no job
+  started; no range at all -> 400 naming `ocr_pages`. Covered pages are never
+  re-OCR'd, so verified/rejected items are safe. bbox/caption routes parse box
   coords through `_parse_box`, rejecting non-finite (NaN/Inf) values with 400.
   `apply_action` (used by `/item/<id>/action`) treats `verified`/`rejected` items as
   final except for an explicit **flip to the other state** (accept↔reject; same-state
@@ -197,7 +220,10 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   standalone CODE/COMMENTARY markers — applied **at export only** (verified JSON,
   not the review UI/doc).
 - `templates/index.html` — single-page JS UI. Has an `autoOcr()` + `?ocr=1` gate
-  (upload PDF-only → auto-starts OCR). Upload form has an optional `ocr_pages` text
+  (upload PDF-only → auto-starts OCR) and an `ocrMore()` + `#ocrMorePages`
+  input/button on the doc page ("OCR more pages": posts `{ocr_pages}` to
+  `/ocr/<doc_id>`, shows `skipped` already-OCR'd pages, reuses `#ocrbar` + `pollJob`,
+  `location.reload()` on done). Upload form has an optional `ocr_pages` text
   input. `post()`, `pollJob(jobId, done, progress)` helpers (progress callback
   updates the line while running). Auto-OCR bar and upload status show live
   `D/T pages`. Header shows an "OCR'd X/Y pages" coverage line (pages with ≥1 item
@@ -264,7 +290,9 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
 - Upload accepts an optional `ocr_pages` range — single (`5`, `1-3`) or
   comma-separated (`2-3, 4-9`); stored on the pending doc JSON as a list of
   `[start, end]` pairs and honored by the initial OCR run only (re-OCR of extra
-  pages out of scope). Invalid values return 400.
+  pages now supported incrementally via `/ocr/<doc_id>` + a new `ocr_pages` range;
+  `doc["ocr_pages"]` itself is left untouched — coverage still derives from items).
+  Invalid values return 400.
 - OCR jobs report live `done`/`total` page counts, surfaced in the auto-OCR bar,
   the upload status line, and the review-page "OCR'd X/Y pages" line.
 - `testOCR` doc: page 1 cost table (HTML→markdown) + page 3 pipe table both recognized.
@@ -280,15 +308,19 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   (rag_uploader backfills the section from the eq key and folds the provision
   statement into equation chunks — applies to the existing verified set, no
   re-OCR: current ACI export backfills 11 eq sections, folds 3 statements).
-- **KB table chunks → clean Unicode, deduped, self-contained (resolved):**
+- **KB table chunks → clean Unicode, deduped, self-contained (resolved + re-tested):**
   `_math_to_text` no longer strips `_` and emits `λ_s`/`ρ_w`/`√(f_c′)`
   (both `\lambda_s` and `\lambda_{s}` keep their `_`), fixing the qwen λ-drop
   in Table 22.5.5.1 (c) and Table 22.6.5.2. Table chunks now emit ONE canonical
   representation (caption + normalized Unicode table; raw LaTeX mirror
   dropped) plus inline `Symbols:` definitions for `A_g`/`b_w`/`b_o`/`N_u`/`β`/`α_s`.
-  Pending: re-upload to the "Verified OCR" KB and re-run the qwen query to
-  confirm both λ factors appear and the duplicate-content / mangled-math /
-  missing-definitions hedge class is gone.
+  **Re-test 2026-09-01 (Qwen3.8-27B + tool + `rag_scope` hybrid/autoinject,
+  `max_tokens: 32000`): PASS.** Table 22.6.5.2 least-of-(a)(b)(c) answer carried
+  BOTH λ factors; Table 22.5.5.1 row (c) `0.66λ_sλ(ρ_w)^⅓√(f_c′)b_w·d` carried
+  `λ_s`+`λ`+`ρ_w`, while row (b) correctly had NO `λ_s` (λ_s is row-(c)-only) —
+  the old duplicate-content / mangled-math / dropped-λ/merged-"lambdas" class is
+  gone. Caveat first seen in this re-test: bare `rag_scope` injects nothing; the
+  tool must be declared (see "Querying the KB" bullet + docs).
 - Equation keys are edited via dedicated eq-number/eq-letters inputs in the
   Edit + Accept editor and are never auto-re-derived on accept (None = untouched,
   "" = cleared). The draw-box has a type selector (`bboxType`, auto default;
@@ -314,12 +346,16 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
 ## Tests / verification
 
 - `python3 test_itemizer.py` — 68 itemizer assertions.
-- `python3 smoke_test.py` — 111 end-to-end checks via Flask test client (no live OCR;
+- `python3 smoke_test.py` — 126 end-to-end checks via Flask test client (no live OCR;
   asserts `?ocr=1` redirect, no-key OCR error, `parse_page_range`/`parse_page_ranges`
   valid+invalid forms, `ocr_pages` storage incl. multiple ranges, invalid -> 400,
   md-wins-over-range, NaN bbox coords rejected, equation key accept/preserve/clear,
   `append_bbox_item` kinds (incl. HTML-table-wrapper strip for equation/text,
-  raw-keep for table), bbox `type` validation, item delete).
+  raw-keep for table), bbox `type` validation, item delete, incremental `/ocr`
+  routes (no-range/invalid/all-covered -> 400, uncovered/mixed -> 200 + job_id +
+  skipped count, form-field fallback, clamp beyond PDF, fully-beyond -> 400) and
+  `merge_ocr_markdown` unit checks (append order, replace-in-range, page 1 and
+  `# OCR:` header preserved)).
 - A quick GPU/alive check: `curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:5000/`
   (app) and `:8888` (unsloth); `nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader`
   should show >0% during OCR.

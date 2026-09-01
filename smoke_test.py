@@ -426,6 +426,87 @@ def main():
     r = client.post(f"/item/{doc_id}/does-not-exist/delete", json={})
     check(r.status_code == 404, "delete unknown item 404")
 
+    # incremental OCR: a doc with items only on pages 1-2 of a 3-page PDF
+    merge_dir = REPO / "validation" / "uploads" / "merge"
+    merge_dir.mkdir(parents=True, exist_ok=True)
+    m_pdf = merge_dir / "merge.pdf"
+    m_md = merge_dir / "merge.md"
+    if not m_pdf.exists():
+        doc = pymupdf.open()
+        for _ in range(3):
+            doc.new_page()
+        doc.save(str(m_pdf))
+        doc.close()
+    m_md.write_text(MARKDOWN)  # pages 1-2 only
+    r = client.post("/load", data={"pdf_path": str(m_pdf), "md_path": str(m_md)})
+    check(r.status_code == 302, "/load merge.pdf 302")
+    mg = read_json(REPO / "validation" / "pending" / "merge.json")
+    check(mg["n_pages"] == 3 and [p["page"] for p in mg["pages"]] == [1, 2],
+          "merge doc: 3-page PDF, items on pages 1-2 only")
+
+    # no range on a doc with items -> actionable 400 naming ocr_pages
+    r = client.post("/ocr/merge", json={})
+    check(r.status_code == 400 and "ocr_pages" in r.get_data(as_text=True),
+          "/ocr on doc with items, no range -> 400 naming ocr_pages")
+    # invalid range -> 400
+    r = client.post("/ocr/merge", json={"ocr_pages": "3-1"})
+    check(r.status_code == 400, "/ocr invalid range -> 400")
+    r = client.post("/ocr/merge", json={"ocr_pages": "abc"})
+    check(r.status_code == 400, "/ocr non-numeric range -> 400")
+    # fully inside already-covered pages -> 400, no job started
+    r = client.post("/ocr/merge", json={"ocr_pages": "1-2"})
+    check(r.status_code == 400 and "already OCR" in r.get_data(as_text=True),
+          "/ocr all-covered range -> 400 already OCR'd")
+    # uncovered page -> 200 + job_id (async job itself fails: key unset)
+    r = client.post("/ocr/merge", json={"ocr_pages": "3"})
+    check(r.status_code == 200 and r.get_json().get("job_id"),
+          "/ocr uncovered page -> 200 with job_id")
+    check(r.get_json().get("skipped") == 0, "uncovered-only range -> skipped 0")
+    # mixed covered + uncovered -> skipped counts the already-covered page
+    r = client.post("/ocr/merge", json={"ocr_pages": "2-3"})
+    check(r.status_code == 200 and r.get_json().get("skipped") == 1,
+          "mixed range -> 200, skipped=1 for covered page 2")
+    # form-field fallback (no JSON body) accepted too
+    r = client.post("/ocr/merge", data={"ocr_pages": "3"})
+    check(r.status_code == 200 and r.get_json().get("job_id"),
+          "form-field ocr_pages accepted")
+    # range tail beyond the PDF clamps to n_pages; page 3 still uncovered
+    r = client.post("/ocr/merge", json={"ocr_pages": "3-9"})
+    check(r.status_code == 200 and r.get_json().get("skipped") == 0,
+          "range clamped to PDF end -> 200, skipped 0 (page 3 new)")
+    # range fully beyond the PDF -> empty after clamp -> 400, no job
+    r = client.post("/ocr/merge", json={"ocr_pages": "9-15"})
+    check(r.status_code == 400, "range beyond PDF -> 400 after clamp")
+
+    # merge helper unit tests (no PDF/OCR involved)
+    def page_order(md):
+        return re.findall(r"^--- Page (\d+) ---", md, re.M)
+
+    def block(md, n):
+        tail = re.split(rf"^--- Page {n} ---\s*", md, flags=re.M)[1]
+        return re.split(r"^--- Page \d+ ---\s*", tail, flags=re.M)[0].strip()
+
+    md12 = MARKDOWN
+    md3 = appmod.assemble_markdown(
+        [{"page": 3, "path": "p3.png", "text": "PAGE THREE", "truncated": False}],
+        source_name="")
+    merged = appmod.merge_ocr_markdown(md12, md3)
+    check(page_order(merged) == ["1", "2", "3"], "merge appends page 3 in order 1,2,3")
+    check("# OCR:" not in merged and block(merged, 1) == block(md12, 1),
+          "merge keeps page 1 block, no duplicated header")
+    md2b = appmod.assemble_markdown(
+        [{"page": 2, "path": "p2.png", "text": "REPLACED TWO", "truncated": False}],
+        source_name="")
+    merged2 = appmod.merge_ocr_markdown(md12, md2b)
+    check(page_order(merged2) == ["1", "2"] and block(merged2, 2) == "REPLACED TWO"
+          and block(merged2, 1) == block(md12, 1),
+          "merge replaces page 2 block, page 1 untouched")
+    merged3 = appmod.merge_ocr_markdown("# OCR: merge.pdf\n" + md12, md3)
+    check(merged3.startswith("# OCR: merge.pdf") and page_order(merged3) == ["1", "2", "3"],
+          "merge preserves the # OCR: header")
+
+    client.post("/doc/merge/discard")
+
     # discard document: pending record + verified/rejected item copies removed
     r = client.post(f"/doc/{doc_id}/discard")
     check(r.status_code == 200 and not (REPO / "validation" / "pending" / f"{doc_id}.json").exists(),
