@@ -1,0 +1,20 @@
+{
+  "name": "flex_capacity",
+  "description": "Nominal and design flexural capacity of a singly reinforced rectangular section. a = A_s·f_y/(0.85·f'c·b), c = a/β₁, ε_t = 0.003·(d−c)/c, M_n = A_s·f_y·(d−a/2), φ from Table 21.2.2. Assumes tension steel yields. Returns M_n_kNm, phiM_n_kNm, a_mm, c_mm, beta_1, epsilon_t, phi, A_s_mm2.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "b": {"type": "number", "description": "Beam width (mm)", "exclusiveMinimum": 0},
+      "d": {"type": "number", "description": "Effective depth (mm)", "exclusiveMinimum": 0},
+      "A_s": {"type": "number", "description": "Tension steel area (mm²)", "exclusiveMinimum": 0},
+      "f_c": {"type": "number", "description": "Concrete compressive strength f'c (MPa)", "exclusiveMinimum": 0},
+      "f_yl": {"type": "number", "description": "Longitudinal steel yield strength (MPa)", "exclusiveMinimum": 0}
+    },
+    "required": ["b", "d", "A_s", "f_c", "f_yl"],
+    "additionalProperties": false
+  },
+  "output": {
+    "unit": "kN·m",
+    "basis": "ACI 318M-19 §22.2.2.4.3 (β₁), Table 21.2.2 (φ), §22.2.2.1 (stress block)"
+  }
+}

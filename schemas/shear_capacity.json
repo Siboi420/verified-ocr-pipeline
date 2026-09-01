@@ -1,0 +1,24 @@
+{
+  "name": "shear_capacity",
+  "description": "Nominal and design shear capacity of a rectangular beam. Simplified Vc (Eq. 22.5.5.1(a)) unless A_s, V_u and M_u are all given, then detailed Vc (Eq. 22.5.5.1(b)) capped at 0.29·λ·sqrt(f'c)·b·d. Stirrup contribution Vs = A_v·f_yw·d/s (Eq. 22.5.8.5.3) applies when A_v, s and f_yw are all > 0. λ = 1.0 normal-weight. Returns V_c_kN, V_s_kN, V_n_kN, phiV_n_kN, phi_v.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "b": {"type": "number", "description": "Beam width or web width (mm)", "exclusiveMinimum": 0},
+      "d": {"type": "number", "description": "Effective depth (mm)", "exclusiveMinimum": 0},
+      "f_c": {"type": "number", "description": "Concrete compressive strength f'c (MPa)", "exclusiveMinimum": 0},
+      "A_v": {"type": "number", "description": "Total stirrup area, usually 2 × one leg (mm²)", "minimum": 0, "default": 0},
+      "s": {"type": "number", "description": "Stirrup spacing (mm)", "minimum": 0, "default": 0},
+      "f_yw": {"type": "number", "description": "Stirrup yield strength (MPa)", "minimum": 0, "default": 0},
+      "A_s": {"type": "number", "description": "Longitudinal tension steel area (mm²); with V_u/M_u switches to detailed Vc", "exclusiveMinimum": 0, "default": null},
+      "V_u": {"type": "number", "description": "Factored shear at critical section (kN); with A_s/M_u switches to detailed Vc", "default": null},
+      "M_u": {"type": "number", "description": "Factored moment at critical section (kN·m); must be > 0 for detailed Vc", "exclusiveMinimum": 0, "default": null}
+    },
+    "required": ["b", "d", "f_c"],
+    "additionalProperties": false
+  },
+  "output": {
+    "unit": "kN",
+    "basis": "ACI 318M-19 §22.5.5.1(a)/(b) + §22.5.8.5.3, φ=0.75 (§21.2.1); Eq(c) size-effect not implemented"
+  }
+}
