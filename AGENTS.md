@@ -104,7 +104,12 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   `_run_ocr(page_range=new_pages)` which **merges** the fresh blocks into the
   existing `--- Page N ---` markdown via `merge_ocr_markdown` (leading `# OCR:`
   header kept, page blocks updated by number, reassembled ascending; a doc with no
-  existing md content falls back to a fresh full `assemble_markdown`). Response is
+  existing md content falls back to a fresh full `assemble_markdown`). The merge
+  persists via `merge_pages_into_doc`, which **preserves review state**: items are
+  re-parsed but restored by their deterministic id (`<doc_id>-p<n>-i<k>`) —
+  status, edited content, `table_spans`, eq keys — and drawn-box (`-bbox*`)
+  items, which live only in the page dicts and not the md, are re-attached
+  (previously a wholesale re-parse dropped them). Response is
   `{job_id, skipped}` (skipped = wanted-count minus new). Fully-covered or empty-
   after-clamp ranges -> 400 ("all requested pages already OCR'd") with no job
   started; no range at all -> 400 naming `ocr_pages`. Covered pages are never
@@ -346,16 +351,18 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
 ## Tests / verification
 
 - `python3 test_itemizer.py` — 68 itemizer assertions.
-- `python3 smoke_test.py` — 126 end-to-end checks via Flask test client (no live OCR;
+- `python3 smoke_test.py` — 132 end-to-end checks via Flask test client (no live OCR;
   asserts `?ocr=1` redirect, no-key OCR error, `parse_page_range`/`parse_page_ranges`
   valid+invalid forms, `ocr_pages` storage incl. multiple ranges, invalid -> 400,
   md-wins-over-range, NaN bbox coords rejected, equation key accept/preserve/clear,
   `append_bbox_item` kinds (incl. HTML-table-wrapper strip for equation/text,
   raw-keep for table), bbox `type` validation, item delete, incremental `/ocr`
   routes (no-range/invalid/all-covered -> 400, uncovered/mixed -> 200 + job_id +
-  skipped count, form-field fallback, clamp beyond PDF, fully-beyond -> 400) and
+  skipped count, form-field fallback, clamp beyond PDF, fully-beyond -> 400),
   `merge_ocr_markdown` unit checks (append order, replace-in-range, page 1 and
-  `# OCR:` header preserved)).
+  `# OCR:` header preserved), and `merge_pages_into_doc` review-state
+  preservation (verified status + edited content survive a merge, new pages land
+  pending, drawn-box items re-attached)).
 - A quick GPU/alive check: `curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:5000/`
   (app) and `:8888` (unsloth); `nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader`
   should show >0% during OCR.

@@ -136,6 +136,46 @@ def merge_ocr_markdown(existing_md, new_md):
     return "\n".join(parts)
 
 
+def merge_pages_into_doc(doc, new_pages, results):
+    """Merge OCR results for new pages into the doc and persist.
+
+    Rewrites the doc's markdown (existing pages verbatim, new page blocks
+    added), then re-parses and restores review state (status, edited content,
+    table_spans, eq keys) for every item that already existed — item ids are
+    deterministic (``<doc_id>-p<n>-i<k>``), so unchanged pages parse to the
+    same ids and the old dicts are copied back onto the fresh parse. New
+    pages' items stay pending. Never re-OCR'd or replaced: verified/rejected
+    state survives an incremental merge.
+    """
+    md_path = Path(doc["md_path"])
+    existing = md_path.read_text() if md_path.exists() else ""
+    new_md = assemble_markdown(results, source_name="")
+    markdown = merge_ocr_markdown(existing, new_md) if existing.strip() else \
+        assemble_markdown(results, source_name=doc["source_name"])
+    md_path.write_text(markdown)
+    old_pages = {p["page"]: p for p in (doc.get("pages") or [])}
+    old_items = {
+        it["id"]: it for p in old_pages.values() for it in p.get("items", [])
+    }
+    doc["pages"] = parse_document(markdown, doc["doc_id"])
+    for pg in doc["pages"]:
+        fresh_ids = {it["id"] for it in pg["items"]}
+        for it in pg["items"]:
+            old = old_items.get(it["id"])
+            if old is not None:
+                it.update(old)  # restore status, edits, spans, eq keys
+        # Re-attach page-dict-only items (drawn-box crops) that the fresh
+        # parse cannot reproduce: they live in the page dict, not the md.
+        old_pg = old_pages.get(pg["page"])
+        if old_pg:
+            kept = [it for it in old_pg.get("items", []) if it["id"] not in fresh_ids]
+            pg["items"] = pg["items"] + kept
+    if not doc.get("n_pages"):
+        doc["n_pages"] = page_count(Path(doc["pdf_path"]))
+    save_doc(doc)
+    return doc
+
+
 def _target_page(doc, page):
     """Get (creating if needed) the page dict for a page number."""
     target = next((p for p in doc.get("pages", []) if p["page"] == page), None)
@@ -432,16 +472,13 @@ def _run_ocr(job_id, doc, page_range=None):
             except OSError:
                 pass
         if page_range is not None:
-            # Incremental merge: keep existing pages verbatim, add the new ones.
-            md_path = Path(doc["md_path"])
-            existing = md_path.read_text() if md_path.exists() else ""
-            new_md = assemble_markdown(results, source_name="")
-            markdown = merge_ocr_markdown(existing, new_md) if existing.strip() else \
-                assemble_markdown(results, source_name=doc["source_name"])
+            # Incremental merge: keep existing pages verbatim, add the new
+            # ones, and preserve review state of already-existing items.
+            merge_pages_into_doc(load_doc(doc["doc_id"]), page_range, results)
         else:
             markdown = assemble_markdown(results, source_name=doc["source_name"])
-        Path(doc["md_path"]).write_text(markdown)
-        parse_and_persist(load_doc(doc["doc_id"]))  # fresh dict -> pages
+            Path(doc["md_path"]).write_text(markdown)
+            parse_and_persist(load_doc(doc["doc_id"]))  # fresh dict -> pages
         JOBS[job_id]["status"] = "done"
     except Exception as e:
         JOBS[job_id] = {"status": "error", "error": str(e)}

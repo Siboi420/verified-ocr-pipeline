@@ -505,6 +505,44 @@ def main():
     check(merged3.startswith("# OCR: merge.pdf") and page_order(merged3) == ["1", "2", "3"],
           "merge preserves the # OCR: header")
 
+    # merge_pages_into_doc (no live OCR): review state survives an incremental
+    # merge — page 1 item stays verified, page 3 items arrive pending.
+    mer = read_json(REPO / "validation" / "pending" / "merge.json")
+    keep_id = mer["pages"][0]["items"][0]["id"]
+    r = client.post(f"/item/merge/{keep_id}/action", json={"action": "accept"})
+    check(r.status_code == 200, "accept page-1 item before incremental merge")
+    mer = read_json(REPO / "validation" / "pending" / "merge.json")
+    check(next(i for i in mer["pages"][0]["items"] if i["id"] == keep_id)["status"] == "verified",
+          "item verified before merge")
+    appmod.merge_pages_into_doc(
+        mer, [3],
+        [{"page": 3, "path": "p3.png", "text": "PAGE THREE", "truncated": False}])
+    mer = read_json(REPO / "validation" / "pending" / "merge.json")
+    p1 = mer["pages"][0]
+    kept = next(i for i in p1["items"] if i["id"] == keep_id)
+    check(kept["status"] == "verified" and kept["content"] == p1["items"][0]["content"],
+          "page-1 review state preserved across incremental merge")
+    p3 = next(p for p in mer["pages"] if p["page"] == 3)
+    check(p3["items"] and all(i["status"] == "pending" for i in p3["items"]),
+          "new page 3 items arrive pending")
+    check([p["page"] for p in mer["pages"]] == [1, 2, 3],
+          "merged doc pages in order 1,2,3")
+
+    # bbox-style items (page-dict-only, not in md) survive an incremental merge
+    mer = read_json(REPO / "validation" / "pending" / "merge.json")
+    bbox_id = f"merge-p1-bbox{os.urandom(4).hex()}"
+    mer["pages"][0]["items"].append({
+        "id": bbox_id, "type": "text", "content": "drawn crop",
+        "status": "verified", "page": 1})
+    (REPO / "validation" / "pending" / "merge.json").write_text(json.dumps(mer))
+    appmod.merge_pages_into_doc(
+        read_json(REPO / "validation" / "pending" / "merge.json"), [4],
+        [{"page": 4, "path": "p4.png", "text": "PAGE FOUR", "truncated": False}])
+    mer = read_json(REPO / "validation" / "pending" / "merge.json")
+    check(bbox_id in [i["id"] for i in mer["pages"][0]["items"]]
+          and next(i for i in mer["pages"][0]["items"] if i["id"] == bbox_id)["status"] == "verified",
+          "drawn-box item survives incremental merge")
+
     client.post("/doc/merge/discard")
 
     # discard document: pending record + verified/rejected item copies removed
