@@ -64,6 +64,17 @@ has its own AGENTS.md). This app is the human-review step feeding that research.
   - **Backend is CUDA now**: `POST /api/llama/backend {"backend":"cuda"}` switches the
     llama.cpp build (WSL2 RTX 2080 Ti 11GB, `/dev/dxg`). GPU offload verified
     (100% util, ~2.6s/inference vs 10-15s CPU).
+  - **Second model (orchestrator)**: `unsloth/Qwen3.8-27B-GGUF` (cached
+    `Qwen3.8-27B-UD-IQ2_XXS.gguf`, ~7.3GB complete blob; GPU 0% when idle).
+    Loaded via the same `POST /api/inference/load` with that `model_path` (or the
+    local snapshot path to a `.gguf` to skip hub-download stalls — stale
+    `blobs/*.incomplete` files make hub loads loop forever). Verified 2026-09-02:
+    tool-call responses use the **native OpenAI `message.tool_calls` shape** (id +
+    `function.name` + `function.arguments` JSON string) — no `<tool_call>` marker
+    format; the message also carries `reasoning_content`, which must NOT be echoed
+    back (drop it in the round-trip). context_length 17408; `max_tokens: 32000`.
+    Only one model loads at a time — swapping GLM-OCR ↔ Qwen requires an unload
+    / reload cycle.
 - **WSL2, RTX 2080 Ti 11GB**, Python 3, Flask, PyMuPDF. Deps in `requirements-ocr.txt`.
 - **Querying the KB**: `POST /api/rag/search` defaults to `mode:"hybrid"` (BM25+dense),
   `top_k` 1-50 (default 10), `min_score` filters the dense component (default 0.0);
@@ -189,6 +200,25 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   guards both the unbracketed and braced-subscript (two-way) paths.
   Deliberately deferred: preserving `^` or adding a `*` separator (re-add
   only if the re-test still drops a λ).
+- `orchestrator.py` — RAG + tool-calling Q&A loop (stdlib + urllib only, no new
+  deps). Question from `--question` or stdin (both empty → usage, exit 2;
+  missing `UNSLOTH_API_KEY` → error, exit 1; `--max-tokens` default 32000).
+  Retrieves `top_k=3` hybrid chunks via `POST /api/rag/search` (`text` field) from
+  the `Verified OCR` KB (`24895fae-4771-4381-b7e8-75c4ee7b5bae`), globs
+  `schemas/*.json` into OpenAI function tools, then loops (≤8 iters) against
+  `unsloth/Qwen3.8-27B-GGUF`: tool calls run through
+  `functions/wrapper.py:call_tool()` (imported via `importlib`, same pattern as
+  test_shear_tools.py); wrapper `ValueError`s (unknown tool / bad input / missing
+  schema) are serialized `{"error": …}` back to the model, never crash the loop;
+  final non-tool message is printed, exit 0; iteration cap → exit 1.
+  Tool-call parsing handles both the native `message.tool_calls` shape and a
+  `<tool_call>`-marker fallback (Qwen marker format) — the marker regex only ever
+  fires if the backend stops emitting the native shape (verified native-only
+  2026-09-02). System prompt is the `docs/infrastructure.md` guardrails (no
+  arithmetic from memory, cite sources, flag uncertainty). Verified end-to-end:
+  a wrong first call (`shear_capacity` with `d=0`) was rejected, the model
+  course-corrected to `min_shear_reinf(b_w=350, f_c=28, f_yt=420)` →
+  `291.67 mm²/m`, then answered from the tool result.
 - `config.py` — `API_BASE` (default `http://localhost:8888`), `API_KEY` (env-only),
   `MODEL = "ggml-org/GLM-OCR-GGUF"`, `UPLOAD_DIR`.
 - `ocr_engine.py` — `pdf_to_images(dpi=200, page_range=None)` (accepts a single
@@ -282,6 +312,11 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   `/item/<doc>/<item>/delete`, re-render, no cursor advance; the item and its
   verified/rejected copies are removed.
 - `validation/` — `pending/` (docs), `verified/`, `rejected/` (per-item JSON), `uploads/<doc_id>/` (pdf, md, page PNGs).
+- `functions/beam_calc.py` — self-contained, **stdlib-only** (math; numpy/matplotlib/argparse/yaml dropped) ACI 318M-19 beam shear/flexure calcs extracted from the BeamValidation repo
+  (github.com/Siboi420/BeamValidation, commit `668be3670dc8ba065f215a0ca1b59eb9e3bd8ca5`, `scripts/RCBeam_moment_capacity.py`). Public: `min_shear_reinf(b_w, f_c, f_yt)` → Av,min per metre (mm²/m, §9.6.3.3, `max(0.062·√f'c·b_w/f_yt, 0.35·b_w/f_yt)·1000`); `shear_capacity(...)` → wrapped `compute_aci_shear` (simplified Vc §22.5.5.1(a) unless A_s+V_u+M_u given, then detailed (b) capped §22.5.8.5.3; φ_v=0.75); `flex_capacity(...)` → wrapped `compute_aci_flexure` (stress block §22.2.2.1, β₁ §22.2.2.4.3, φ Table 21.2.2). Constants EPSILON_CU=0.003, Es=2e5, λ=1.0. The 318-19 size-effect Vc Eq (c) is NOT implemented (noted in schema basis — no fabricated coverage).
+- `functions/wrapper.py` — schema-driven dispatcher (`call_tool(name, **kwargs)` → `{value, unit, basis}`; registry maps the 3 tool names; loads the matching `schemas/<name>.json` resolved via `__file__`; validates required fields, unknown keys, numeric type/finiteness, exclusiveMinimum/minimum bounds; raises `ValueError` with a clear message). Schema read/parse errors (missing file, bad JSON) are wrapped as `ValueError`.
+- `functions/test_shear_tools.py` — plain asserts + PASS/FAIL (no framework), 11 checks over all three tools + wrapper shape/unit/basis + validation error paths (missing/negative/non-numeric/unknown-key/unknown-tool); exits non-zero on failure. Loads sibling modules via `importlib` so it runs from any cwd.
+- `schemas/min_shear_reinf.json`, `schemas/shear_capacity.json`, `schemas/flex_capacity.json` — OpenAI function-calling shape (`name`/`description`/`parameters` with `type`/`properties`/`required`/`additionalProperties:false`) plus an `output` block carrying `unit` + `basis` (returned by wrapper).
 
 ## Current state (verified facts — don't contradict)
 
@@ -351,6 +386,7 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
 ## Tests / verification
 
 - `python3 test_itemizer.py` — 68 itemizer assertions.
+- `python3 functions/test_shear_tools.py` — 11 hand-calc checks for the `functions/` shear/flexure tools (Av,min mm²/m, simplified Vc, flexure M_n/φ, wrapper shape + unit/basis, validation error paths); plain asserts + PASS/FAIL, exit non-zero on failure.
 - `python3 smoke_test.py` — 132 end-to-end checks via Flask test client (no live OCR;
   asserts `?ocr=1` redirect, no-key OCR error, `parse_page_range`/`parse_page_ranges`
   valid+invalid forms, `ocr_pages` storage incl. multiple ranges, invalid -> 400,
@@ -363,6 +399,9 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   `# OCR:` header preserved), and `merge_pages_into_doc` review-state
   preservation (verified status + edited content survive a merge, new pages land
   pending, drawn-box items re-attached)).
+- `python3 orchestrator.py --selftest` — offline PASS: schema glob yields exactly
+  the 3 tool names in the right shape, tool-call extraction parses both synthetic
+  native `tool_calls` and `<tool_call>`-marker payloads (no server/key needed).
 - A quick GPU/alive check: `curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:5000/`
   (app) and `:8888` (unsloth); `nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader`
   should show >0% during OCR.
