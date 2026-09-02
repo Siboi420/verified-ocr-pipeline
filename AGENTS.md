@@ -193,14 +193,18 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   or `{"doc_id":"__all__"}` → `{uploaded:[filenames], skipped:n}` (single doc
   404s when it has no verified items; `__all__` uploads every verified doc and
   counts doc dirs that yielded nothing).
-  Model: `GET /api/model` → `{loaded, key}` (key resolved by GGUF filename
-  suffix against `models.MODELS`); `POST /api/model/load` `{model:"ocr"|"chat"}`
-  → `{status:"done", step:"already loaded"}` when the target is resident (no GPU
-  churn), else a background job in the shared `JOBS` dict (`unloading <name>` →
-  `loading <name>` → `done/loaded <name>` or `error`), polled via `/jobs/<id>`.
-  The worker ALWAYS calls `models.unload(target)` before `models.load(key)` —
-  unload-before-load is the single-model invariant; `unload(None)` is a no-op
-  when nothing is loaded. Verified live 2026-09-03 against :8888.
+  Model: `GET /api/model` → `{loaded, key, job}` (key resolved by GGUF filename
+  suffix against `models.MODELS`; `job` = `{id, status, step}` for an in-flight
+  model swap, else null — the `MODEL_JOB_ID` module global points at the active
+  job and the worker clears it on done/error, so the header re-attaches progress
+  after a tab switch/reload; tabs are full page loads). `POST /api/model/load`
+  `{model:"ocr"|"chat"}` → `{status:"done", step:"already loaded"}` when the
+  target is resident (no GPU churn), else a background job in the shared `JOBS`
+  dict (`unloading <name>` → `loading <name>` → `done/loaded <name>` or
+  `error`), polled via `/jobs/<id>`. The worker ALWAYS calls
+  `models.unload(target)` before `models.load(key)` — unload-before-load is the
+  single-model invariant; `unload(None)` is a no-op when nothing is loaded.
+  Verified live 2026-09-03 against :8888.
 - `rag_uploader.py` — reads `validation/verified/<doc_id>/*.json` (one folder per
   doc), groups items by
   `doc_id`, renders one markdown file per source doc (`source_name` header, per-item
@@ -338,11 +342,15 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   `tab` context var), the model bar (status chip polling `GET /api/model` +
   **Load GLM-OCR** / **Load granite** buttons — the page's own model gets the
   `primary` style via `page_model`; disabled while a swap job runs), a fixed
-  toast container, and shared JS: `toast()`, `progress()`/`clearProgress()` (the
-  swap shows one live toast: `unloading <name>` → `loading <name>` →
-  `✓ loaded <name>`, red toast on error with the backend message),
-  `loadModel(key, name)` (posts `/api/model/load`, polls `/jobs/<id>`),
-  `modelState()` (chip on load), and `window.kbFetch()` (GET /api/kb helper).
+  toast container, and shared JS: `toast()`, `progress()`/`clearProgress()`, a
+  swap shows one live toast (`unloading <name>` → `loading <name>` →
+  `✓ loaded <name>`, red toast on error),
+  `pollModelJob(jobId)` (polls `/jobs/<id>`; shared by load and by re-attach),
+  `loadModel(key, name)` (posts `/api/model/load`, delegates to `pollModelJob`),
+  `modelState()` (chip on load; if `/api/model` reports a running `job`, shows the
+  progress toast and calls `pollModelJob` — this is how progress survives a tab
+  switch, since tabs are full page loads), and `window.kbFetch()` (GET /api/kb
+  helper).
 - `templates/index.html` — single-page JS UI. Includes `_header.html` (`
   tab="ocr"`, `page_model="ocr"`; the old inline `<header>` is now a card row
   holding the doc pill / counter / OCR-coverage / OCR-more inputs). List branch
@@ -492,7 +500,7 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   to 120s, matching by GGUF filename suffix). Model swap verified live:
   `POST /api/model/load` with nothing loaded → `unloading resident` (no-op) →
   `loading GLM-OCR` → `done/loaded GLM-OCR`; second load short-circuits `already
-  loaded`. Smoke test grew 132 → **186 backend-testable checks** (sessions CRUD,
+  loaded`. Smoke test grew 132 → **189 backend-testable checks** (sessions CRUD,
   chat message echo/persist/trace-kinds, KB routes + upload incl. `__all__` via a
   stubbed `rag_uploader._api` and a temp `VERIFIED_DIR`, model swap states with
   `models.*` stubbed, header/tab render on both pages).
@@ -536,7 +544,7 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
 
 - `python3 test_itemizer.py` — 68 itemizer assertions.
 - `python3 functions/test_shear_tools.py` — 19 hand-calc checks for the `functions/` shear/flexure tools (Av,min mm²/m, simplified Vc, row (c) size-effect Vc incl. λ_s + ρ_w, adequate-stirrup rows (a)/(b), partial stirrups → row (c) + V_s, d↔h/cover_cg equivalence for shear and flex, d-resolution errors (XOR/neither/cover≥h), row (a) fallback, wrapper shape + unit/basis incl. h-path, validation error paths); plain asserts + PASS/FAIL, exit non-zero on failure.
-- `python3 smoke_test.py` — 186 end-to-end checks via Flask test client (no live OCR,
+- `python3 smoke_test.py` — 189 end-to-end checks via Flask test client (no live OCR,
   no backend; `rag_uploader._api`, `models.current_model/unload/load`, and
   `orchestrator.answer_turn` stubbed where they'd hit :8888):
   the original 132 assert `?ocr=1` redirect, no-key OCR error,
@@ -559,7 +567,8 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   KB routes (list/create/rename/delete issue the right Unsloth calls + shapes,
   blank names -> 400, bad kb id -> 404, single-doc + `__all__` upload with
   expected `uploaded` filenames via a temp `VERIFIED_DIR`), model API
-  (`/api/model` reflects stubbed status + key resolution, already-loaded
+  (`/api/model` reflects stubbed status + key resolution + the in-flight `job`
+  field (running synthetic job → exposed; cleared on done/idle), already-loaded
   short-circuit with no calls, cold swap `unload` before `load` with
   unloading/loading steps captured in-stub, warm swap unloads the GLM path,
   load error -> `error` propagated), and shared-header renders on both pages

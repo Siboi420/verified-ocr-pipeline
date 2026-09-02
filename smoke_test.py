@@ -748,6 +748,21 @@ def main():
         r = client.get("/api/model")
         check(r.status_code == 200 and r.get_json()["loaded"] is None
               and r.get_json()["key"] is None, "GET /api/model with nothing loaded")
+        # in-flight model job is exposed (header re-attaches progress on tab
+        # switch / reload — tabs are full page loads, the JS toast alone dies)
+        appmod.MODEL_JOB_ID = "fakej"
+        appmod.JOBS["fakej"] = {"status": "running", "step": "loading granite"}
+        r = client.get("/api/model")
+        check(r.get_json().get("job") == {"id": "fakej", "status": "running",
+                                           "step": "loading granite"},
+              "/api/model exposes an in-flight model job")
+        appmod.JOBS["fakej"]["status"] = "done"
+        check(client.get("/api/model").get_json().get("job") is None,
+              "/api/model job cleared once the job finishes")
+        del appmod.JOBS["fakej"]
+        appmod.MODEL_JOB_ID = None
+        check(client.get("/api/model").get_json().get("job") is None,
+              "/api/model job null when idle")
         model_state["loaded"] = "ggml-org/GLM-OCR-GGUF"
         r = client.get("/api/model")
         check(r.get_json()["key"] == "ocr", "/api/model key resolves ocr by suffix")

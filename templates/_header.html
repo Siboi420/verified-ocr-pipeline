@@ -64,6 +64,26 @@ function progress(msg) {
 function clearProgress() {
   if (progressToast) { progressToast.remove(); progressToast = null; }
 }
+function setModelBusy(b) {
+  document.querySelectorAll('#modelBar button').forEach(btn => btn.disabled = b);
+}
+async function pollModelJob(jobId) {
+  setModelBusy(true);
+  for (;;) {
+    let st = {};
+    try { st = await (await fetch('/jobs/' + jobId)).json(); } catch (e) { /* keep polling; a hiccup is not fatal */ }
+    if (st.status === 'running') {
+      progress(st.step || '…');
+    } else {
+      setModelBusy(false);
+      if (st.status === 'done') { clearProgress(); toast(st.step || 'loaded', 'done'); }
+      else { clearProgress(); toast('✗ ' + (st.error || st.status || 'job lost (app restarted?)'), 'error'); }
+      modelState();  // refresh the chip now that the job is over
+      break;
+    }
+    await new Promise(res => setTimeout(res, 1500));
+  }
+}
 async function modelState() {
   try {
     const r = await fetch('/api/model');
@@ -71,13 +91,15 @@ async function modelState() {
     const chip = document.getElementById('modelChip');
     chip.textContent = j.loaded ? j.loaded : 'none loaded';
     chip.classList.toggle('loaded', !!j.loaded);
+    if (j.job && j.job.status === 'running') {
+      progress(j.job.step || '…');
+      pollModelJob(j.job.id);  // re-attach progress after a tab switch / reload
+    }
   } catch (e) { /* backend down: leave the chip as-is */ }
 }
 async function loadModel(key, name) {
-  const btns = document.querySelectorAll('#modelBar button');
-  const busy = Array.from(btns).some(b => b.disabled);
-  if (busy) return;
-  btns.forEach(b => b.disabled = true);
+  if (Array.from(document.querySelectorAll('#modelBar button')).some(b => b.disabled)) return;
+  setModelBusy(true);
   try {
     const r = await fetch('/api/model/load', {method:'POST',
       headers:{'Content-Type':'application/json'}, body: JSON.stringify({model:key})});
@@ -88,20 +110,13 @@ async function loadModel(key, name) {
     } else if (j.error) {
       toast('error: ' + j.error, 'error');
     } else if (j.job_id) {
-      for (;;) {
-        const jr = await fetch('/jobs/' + j.job_id);
-        const st = await jr.json();
-        if (st.status === 'running') { progress(st.step || '…'); }
-        else if (st.status === 'done') { clearProgress(); toast(st.step, 'done'); modelState(); break; }
-        else { clearProgress(); toast('✗ ' + st.error, 'error'); break; }
-        await new Promise(res => setTimeout(res, 1500));
-      }
+      await pollModelJob(j.job_id);
     }
   } catch (e) {
     clearProgress();
     toast('error: ' + e, 'error');
   } finally {
-    btns.forEach(b => b.disabled = false);
+    setModelBusy(false);
   }
 }
 // KB fetch helper: returns {ok, knowledgeBases} or {ok:false}

@@ -1013,6 +1013,10 @@ def kb_upload(kb_id):
 
 
 MODEL_NAMES = {"ocr": "GLM-OCR", "chat": "granite"}  # human labels for steps/toasts
+# The active model-swap job id, so GET /api/model can report an in-flight job
+# and any page load re-attaches progress (tabs are full page loads — the JS
+# toast alone dies on navigation). Single-user, at most one model job at a time.
+MODEL_JOB_ID = None
 
 
 def _target_loaded():
@@ -1039,11 +1043,18 @@ def model_status():
         for k, path in models.MODELS.items():
             if Path(path).name in loaded:
                 key = k
-    return jsonify({"loaded": loaded, "key": key})
+    resp = {"loaded": loaded, "key": key, "job": None}
+    if MODEL_JOB_ID and MODEL_JOB_ID in JOBS:
+        j = JOBS[MODEL_JOB_ID]
+        if j.get("status") == "running":
+            resp["job"] = {"id": MODEL_JOB_ID, "status": "running",
+                            "step": j.get("step", "")}
+    return jsonify(resp)
 
 
 @app.route("/api/model/load", methods=["POST"])
 def model_load():
+    global MODEL_JOB_ID
     data = request.get_json(silent=True) or {}
     key = str(data.get("model") or "")
     if key not in models.MODELS:
@@ -1057,6 +1068,7 @@ def model_load():
     job_id = uuid.uuid4().hex[:12]
     what = MODEL_NAMES[current_key] if current_key else "resident"
     JOBS[job_id] = {"status": "running", "step": f"unloading {what}"}
+    MODEL_JOB_ID = job_id  # a new load supersedes any stale pointer
     threading.Thread(target=_model_job, args=(job_id, key, current_key), daemon=True).start()
     return jsonify({"job_id": job_id})
 
@@ -1067,6 +1079,7 @@ def _model_job(job_id, key, current_key):
     refuse or evict mid-flight otherwise). force_cancel_active kills
     non-cancellable in-flight generations (ocr_engine sends non-streaming
     calls)."""
+    global MODEL_JOB_ID
     try:
         JOBS[job_id]["step"] = f"unloading {MODEL_NAMES[current_key] if current_key else 'resident'}"
         models.unload(models.MODELS[current_key] if current_key else None)  # no-op when nothing loaded
@@ -1075,6 +1088,9 @@ def _model_job(job_id, key, current_key):
         JOBS[job_id].update(status="done", step=f"loaded {MODEL_NAMES[key]}")
     except Exception as e:
         JOBS[job_id] = {"status": "error", "error": str(e)}
+    finally:
+        if MODEL_JOB_ID == job_id:
+            MODEL_JOB_ID = None  # a later load already superseded it -> leave it
 
 
 if __name__ == "__main__":
