@@ -9,11 +9,15 @@ import os
 import re
 import threading
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 from flask import Flask, abort, jsonify, redirect, render_template, request, send_file  # pyright: ignore[reportMissingImports] — env lacks flask; runtime python3 has it
 
 import config
+import models  # pyright: ignore[reportMissingImports] — same-dir module
+import orchestrator  # pyright: ignore[reportMissingImports] — same-dir module
+import rag_uploader as rag  # pyright: ignore[reportMissingImports] — same-dir module
 from itemizer import INLINE_MATH_RE, clean_export_text, eq_refs, parse_document, parse_table_caption, pick_caption_from_band, unwrap_html_caption  # pyright: ignore[reportMissingImports] — same-dir module
 from ocr_engine import CAPTION_BAND_PROMPT, EQUATION_PROMPT, OCR_PROMPT, assemble_markdown, ocr_batch, ocr_page, parse_page_ranges, pdf_to_images, tesseract_ocr
 
@@ -28,6 +32,10 @@ if not UPLOADS.is_absolute():
 
 for d in (PENDING_DIR, VERIFIED_DIR, REJECTED_DIR, UPLOADS):
     d.mkdir(parents=True, exist_ok=True)
+
+SESSIONS_DIR = BASE / "sessions"  # gitignored; one JSON file per chat session
+SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+MAX_CHAT_TOKENS = 12000  # ponytail: fixed cap, revisit if a legit answer truncates
 
 app = Flask(__name__)
 
@@ -342,9 +350,54 @@ def docs_list():
     return out
 
 
+# --- chat sessions (one JSON file per session, gitignored) ---
+
+
+def _now():
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def session_path(sid):
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", sid):
+        return None
+    return SESSIONS_DIR / f"{sid}.json"
+
+
+def load_session(sid):
+    p = session_path(sid)
+    if not p or not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None  # corrupt: treat as missing
+
+
+def save_session(s):
+    (SESSIONS_DIR / f"{s['id']}.json").write_text(json.dumps(s, indent=2))
+
+
+def sessions_list():
+    out = []
+    for p in SESSIONS_DIR.glob("*.json"):
+        try:
+            out.append(json.loads(p.read_text()))
+        except (json.JSONDecodeError, OSError):
+            continue
+    out.sort(key=lambda s: s.get("updated_at", ""), reverse=True)
+    return out
+
+
 @app.route("/")
 def index():
-    return render_template("index.html", docs=docs_list(), doc=None)
+    return render_template("index.html", docs=docs_list(), doc=None, tab="ocr", page_model="ocr")
+
+
+@app.route("/chat")
+def chat_page():
+    sid = request.args.get("s", "")
+    session = load_session(sid) if sid else None
+    return render_template("chat.html", session=session, tab="chat", page_model="chat")
 
 
 @app.route("/load", methods=["POST"])
@@ -705,7 +758,7 @@ def doc_view(doc_id):
     doc = load_doc(doc_id)
     if doc is None:
         abort(404)
-    return render_template("index.html", docs=docs_list(), doc=doc)
+    return render_template("index.html", docs=docs_list(), doc=doc, tab="ocr", page_model="ocr")
 
 
 @app.route("/page/<doc_id>/<int:n>.png")
@@ -801,6 +854,227 @@ def bulk():
             updated += 1
     save_doc(doc)
     return jsonify({"ok": True, "updated": updated, "doc": doc})
+
+
+# --- chat sessions + messages ---
+
+
+@app.route("/api/chat/sessions", methods=["GET", "POST"])
+def chat_sessions():
+    if request.method == "GET":
+        return jsonify({"sessions": sessions_list()})
+    data = request.get_json(silent=True) or {}
+    name = str(data.get("name") or "").strip()
+    if not name:
+        abort(400, "name required")
+    now = _now()
+    s = {"id": uuid.uuid4().hex[:12], "name": name, "kb_id": None,
+         "created_at": now, "updated_at": now, "messages": []}
+    save_session(s)
+    return jsonify(s), 201
+
+
+@app.route("/api/chat/sessions/<sid>", methods=["GET", "PATCH", "DELETE"])
+def chat_session(sid):
+    s = load_session(sid)
+    if s is None:
+        abort(404)
+    if request.method == "GET":
+        return jsonify(s)
+    if request.method == "DELETE":
+        sid_path = session_path(sid)
+        if sid_path is None:
+            abort(404)
+        sid_path.unlink(missing_ok=True)
+        return jsonify({"ok": True})
+    data = request.get_json(silent=True) or {}
+    if "name" in data:
+        name = str(data.get("name") or "").strip()
+        if not name:
+            abort(400, "name cannot be empty")
+        s["name"] = name
+    if "kb_id" in data:
+        s["kb_id"] = data.get("kb_id") or None
+    s["updated_at"] = _now()
+    save_session(s)
+    return jsonify(s)
+
+
+@app.route("/api/chat/sessions/<sid>/messages", methods=["POST"])
+def chat_message(sid):
+    s = load_session(sid)
+    if s is None:
+        abort(404)
+    data = request.get_json(silent=True) or {}
+    content = str(data.get("content") or "").strip()
+    if not content:
+        abort(400, "content required")
+    developer = bool(data.get("developer"))
+    now = _now()
+    s["messages"].append({"role": "user", "content": content, "ts": now})
+    try:
+        answer, trace = orchestrator.answer_turn(
+            content, s["messages"][:-1], s.get("kb_id"), MAX_CHAT_TOKENS)
+    except RuntimeError as e:
+        s["messages"].pop()  # failed turn: keep the session retryable, don't persist it
+        return jsonify({"error": str(e)}), 502
+    s["messages"].append({"role": "assistant", "content": answer, "ts": _now()})
+    s["updated_at"] = _now()
+    save_session(s)
+    resp = {"answer": answer, "session": s}
+    if developer:
+        resp["trace"] = trace  # dev mode only: trace is live, never persisted
+    return jsonify(resp)
+
+
+# --- Unsloth RAG knowledge-base management ---
+
+
+@app.route("/api/kb")
+def kb_list():
+    try:
+        kbs = rag.list_kbs()
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 502
+    return jsonify({"knowledgeBases": [
+        {"id": k["id"], "name": k["name"],
+         "documentCount": k.get("documentCount", 0),
+         "description": k.get("description")} for k in kbs]})
+
+
+@app.route("/api/kb", methods=["POST"])
+def kb_create():
+    data = request.get_json(silent=True) or {}
+    name = str(data.get("name") or "").strip()
+    if not name:
+        abort(400, "name required")
+    try:
+        kb = rag.create_kb(name, data.get("description") or None)
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 502
+    return jsonify({"id": kb["id"], "name": kb.get("name") or name}), 201
+
+
+@app.route("/api/kb/<kb_id>", methods=["PATCH", "DELETE"])
+def kb_update(kb_id):
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", kb_id):
+        abort(404)
+    if request.method == "DELETE":
+        try:
+            rag.delete_kb(kb_id)
+        except RuntimeError as e:
+            return jsonify({"error": str(e)}), 502
+        return jsonify({"ok": True})
+    data = request.get_json(silent=True) or {}
+    name = str(data.get("name") or "").strip()
+    if not name:
+        abort(400, "name required")
+    try:
+        rag.rename_kb(kb_id, name)
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 502
+    return jsonify({"ok": True, "name": name})
+
+
+def _kb_upload_docs(kb_id, doc_id):
+    """Upload one verified doc (or "__all__") to a KB. Returns
+    (uploaded_filenames, skipped). Raises RuntimeError on API failures."""
+    if doc_id == "__all__":
+        by_doc = rag.docs_from_verified(rag.VERIFIED_DIR)
+        dirs = {d.name for d in rag.VERIFIED_DIR.iterdir() if d.is_dir()}
+        uploaded = []
+        for did, items in sorted(by_doc.items()):
+            rag.upload_doc(kb_id, f"{did}.md", rag.render_markdown(items), False)
+            uploaded.append(f"{did}.md")
+        return uploaded, len(dirs - set(by_doc))
+    items = rag.docs_for_doc(doc_id)
+    if not items:
+        abort(404, f"no verified items for {doc_id}")
+    rag.upload_doc(kb_id, f"{doc_id}.md", rag.render_markdown(items), False)
+    return [f"{doc_id}.md"], 0
+
+
+@app.route("/api/kb/<kb_id>/upload", methods=["POST"])
+def kb_upload(kb_id):
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", kb_id):
+        abort(404)
+    data = request.get_json(silent=True) or {}
+    doc_id = str(data.get("doc_id") or "").strip()
+    if not doc_id:
+        abort(400, 'doc_id required (or "__all__")')
+    try:
+        uploaded, skipped = _kb_upload_docs(kb_id, doc_id)
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 502
+    return jsonify({"uploaded": uploaded, "skipped": skipped})
+
+
+# --- model management (one resident model at a time) ---
+
+
+MODEL_NAMES = {"ocr": "GLM-OCR", "chat": "granite"}  # human labels for steps/toasts
+
+
+def _target_loaded():
+    """The loaded model key ("ocr"/"chat"/None) via models.current_model()
+    (suffix match — the backend may report a resolved local snapshot path).
+    Raises RuntimeError on API failure."""
+    loaded = models.current_model() or ""
+    if not loaded:
+        return None
+    for key, path in models.MODELS.items():
+        if Path(path).name in loaded:
+            return key
+    return None
+
+
+@app.route("/api/model")
+def model_status():
+    try:
+        loaded = models.current_model()
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 502
+    key = None
+    if loaded:
+        for k, path in models.MODELS.items():
+            if Path(path).name in loaded:
+                key = k
+    return jsonify({"loaded": loaded, "key": key})
+
+
+@app.route("/api/model/load", methods=["POST"])
+def model_load():
+    data = request.get_json(silent=True) or {}
+    key = str(data.get("model") or "")
+    if key not in models.MODELS:
+        abort(400, "model must be ocr|chat")
+    try:
+        current_key = _target_loaded()
+        if current_key == key:
+            return jsonify({"status": "done", "step": "already loaded"})
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 502
+    job_id = uuid.uuid4().hex[:12]
+    what = MODEL_NAMES[current_key] if current_key else "resident"
+    JOBS[job_id] = {"status": "running", "step": f"unloading {what}"}
+    threading.Thread(target=_model_job, args=(job_id, key, current_key), daemon=True).start()
+    return jsonify({"job_id": job_id})
+
+
+def _model_job(job_id, key, current_key):
+    """Worker: unload whatever is resident, then load the target model.
+    Unload ALWAYS precedes load (the backend is single-model; load would
+    refuse or evict mid-flight otherwise). force_cancel_active kills
+    non-cancellable in-flight generations (ocr_engine sends non-streaming
+    calls)."""
+    try:
+        JOBS[job_id]["step"] = f"unloading {MODEL_NAMES[current_key] if current_key else 'resident'}"
+        models.unload(models.MODELS[current_key] if current_key else None)  # no-op when nothing loaded
+        JOBS[job_id]["step"] = f"loading {MODEL_NAMES[key]}"
+        models.load(key)
+        JOBS[job_id].update(status="done", step=f"loaded {MODEL_NAMES[key]}")
+    except Exception as e:
+        JOBS[job_id] = {"status": "error", "error": str(e)}
 
 
 if __name__ == "__main__":

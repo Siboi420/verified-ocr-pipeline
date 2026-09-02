@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """RAG + tool-calling Q&A loop over the "Verified OCR" knowledge base.
 
-Question -> hybrid RAG retrieval (top_k=3) -> chat loop with
-unsloth/Qwen3.8-27B-GGUF + the 3 beam tool schemas. When the model emits
-tool calls they are executed via functions/wrapper.py:call_tool() and the
-results (or validation errors) are fed back; the loop ends when the model
-answers without tool calls, or after MAX_ITERS iterations.
+Question -> (optional) hybrid RAG retrieval (top_k=3) -> chat loop with
+unsloth/granite-4.1-8b-GGUF (config.CHAT_MODEL) + the 3 beam tool schemas.
+When the model emits tool calls they are executed via
+functions/wrapper.py:call_tool() and the results (or validation errors) are
+fed back; the loop ends when the model answers without tool calls, or after
+MAX_ITERS iterations. No HTTP server — the Flask app on :5000 owns the chat
+UI and calls answer_turn().
 
 Usage:
     python3 orchestrator.py --question "What is Av,min for b_w=350 f'c=28?"
@@ -22,20 +24,24 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-# Load sibling module explicitly — works from any cwd; pyright stays silent
-# (same pattern as functions/test_shear_tools.py)
+# Load sibling module explicitly — works from any cwd
 sys.path.insert(0, str(Path(__file__).resolve().parent / "functions"))
 wrapper = importlib.import_module("wrapper")
 
-API_BASE = os.environ.get("UNSLOTH_API_BASE", "http://localhost:8888")
-MODEL = "unsloth/Qwen3.8-27B-GGUF"
-KB_ID = "24895fae-4771-4381-b7e8-75c4ee7b5bae"
+import config  # noqa: E402 — after the sys.path juggling
+
+API_BASE = os.environ.get("UNSLOTH_API_BASE", config.API_BASE)
+MODEL = config.CHAT_MODEL
+DEFAULT_KB_NAME = "Verified OCR"  # resolved by name at runtime (KBs can be renamed/deleted)
 TOP_K = 3
 MAX_ITERS = 8
 TEMPERATURE = 0.2
+# Cap output so a reasoning model can't spend the whole window on
+# chain-of-thought and stop with an empty reply. Real answers need ~1-2k;
+# 12000 leaves headroom while bounding worst-case CoT.  # ponytail: fixed cap,
+# revisit if a legit answer ever needs >12k output tokens.
 
-# From docs/infrastructure.md "Guardrails" (lines ~89-95); the "exact" prompt
-# text referenced in the plan was not available, this is the documented source.
+# From docs/infrastructure.md "Guardrails".
 SYSTEM_PROMPT = (
     "You answer structural engineering questions using the retrieved context "
     "and the available calculation tools. No arithmetic from memory - always "
@@ -44,7 +50,9 @@ SYSTEM_PROMPT = (
     "engineering judgment - redirect to an engineer. No data fabrication - "
     "if something is not in your sources, say so. Sections sized as \"200x300\" "
     "are b x h. Capacity tools take effective depth d, or h plus `cover_cg` "
-    "(d = h - cover_cg); never pass total height h as d."
+    "(d = h - cover_cg); never pass total height h as d. After the tool calls "
+    "return their results, answer the user directly with the final value and its "
+    "basis - do not include a chain-of-thought / reasoning preamble."
 )
 
 # Qwen marker-format tool call: <tool_call>{"name": ..., "arguments": {...}}</tool_call>
@@ -54,6 +62,8 @@ _TOOL_CALL_RE = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL)
 def _api(method, path, data=None):
     """POST/GET JSON to Unsloth Studio; returns parsed body, raises RuntimeError
     with the HTTP status and body on failure (mirrors rag_uploader._api pattern)."""
+    if not os.environ.get("UNSLOTH_API_KEY"):
+        raise RuntimeError("UNSLOTH_API_KEY is not set (source .env.local)")
     req = urllib.request.Request(
         API_BASE + path,
         method=method,
@@ -93,10 +103,23 @@ def load_tools():
     return tools
 
 
-def retrieve(query):
+def default_kb_id():
+    """Resolve DEFAULT_KB_NAME to its KB id at runtime; create it if missing
+    (KBs can be renamed/deleted, so a cached id would strand the CLI)."""
+    body = _api("GET", "/api/rag/knowledge-bases")
+    for kb in body.get("knowledgeBases", []):
+        if kb["name"] == DEFAULT_KB_NAME:
+            return kb["id"]
+    kb = _api("POST", "/api/rag/knowledge-bases",
+              {"name": DEFAULT_KB_NAME,
+               "description": "Verified OCR exports from seismic-ai-tools"})
+    return kb["id"]
+
+
+def retrieve(query, kb_id):
     """Hybrid RAG search; returns the chunk texts (empty list if none)."""
     body = _api("POST", "/api/rag/search",
-                {"query": query, "kb_id": KB_ID, "mode": "hybrid", "top_k": TOP_K})
+                {"query": query, "kb_id": kb_id, "mode": "hybrid", "top_k": TOP_K})
     return [r["text"] for r in body.get("results", [])]
 
 
@@ -160,38 +183,75 @@ def chat(messages, tools, max_tokens):
     })["choices"][0]["message"]
 
 
-def run(question, max_tokens):
-    """Answer one question; returns the process exit code."""
-    chunks = retrieve(question)
-    context = "\n\n".join(chunks) if chunks else "(no retrieved chunks)"
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user",
-         "content": f"{question}\n\nContext:\n{context}"},
-    ]
-    tools = load_tools()
-
+def run_loop(messages, tools, max_tokens):
+    """Drive the chat/tool loop; returns (answer, trace). trace is an ordered
+    list of {"kind": ...} steps: "reasoning" (reasoning_content, when the
+    backend emits it), "message" (assistant content), "tool_call"
+    (name + raw arguments), "tool_result" (the wrapper result or {error}),
+    and a final "answer" step. Raises RuntimeError at the iteration cap."""
+    trace = []
     for _ in range(MAX_ITERS):
         message = chat(messages, tools, max_tokens)
+        reasoning = message.get("reasoning_content")
+        if reasoning:
+            trace.append({"kind": "reasoning", "content": reasoning})
         try:
             mode, calls = extract_tool_calls(message)
-        except ValueError as e:
+        except ValueError as e:  # noqa: B015 — pi-lens-ignore: no-boolean-in-except (false positive: plain single-class except)
             # Malformed tool-call block: tell the model, keep the loop alive.
             messages.append(assistant_payload(message, "marker"))
             messages.append(tool_result("marker", None, {"error": str(e)}))
+            trace.append({"kind": "message", "content": message.get("content") or ""})
+            trace.append({"kind": "tool_result", "result": {"error": str(e)}})
             continue
+        trace.append({"kind": "message", "content": message.get("content") or ""})
         if not calls:
-            print(message.get("content") or "")
-            return 0
+            answer = message.get("content") or ""
+            trace.append({"kind": "answer", "content": answer})
+            return answer, trace
         messages.append(assistant_payload(message, mode))
         for call_id, name, raw_arguments in calls:
+            trace.append({"kind": "tool_call", "name": name,
+                          "arguments": raw_arguments})
             try:
                 result = wrapper.call_tool(name, **_norm_args(raw_arguments))
             except (ValueError, json.JSONDecodeError, TypeError) as e:
                 result = {"error": str(e)}
+            trace.append({"kind": "tool_result", "result": result})
             messages.append(tool_result(mode, call_id, result))
-    print("error: reached iteration cap without a final answer", file=sys.stderr)
-    return 1
+    raise RuntimeError("reached iteration cap without a final answer")
+
+
+def answer_turn(user_turn, history, kb_id, max_tokens):
+    """One user turn in a session: (retrieval?) + chat loop.
+
+    history: prior messages [{"role": "user"|"assistant", "content": …}].
+    kb_id: RAG KB to retrieve from; None = no retrieval (bare tools only).
+    Returns (answer, trace); the trace's first step (when kb_id is set) is
+    {"kind": "retrieval", "chunks": […]}."""
+    trace = []
+    context = "(no retrieved chunks)"
+    if kb_id:
+        chunks = retrieve(user_turn, kb_id)
+        trace.append({"kind": "retrieval", "chunks": chunks})
+        context = "\n\n".join(chunks) if chunks else context
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    for m in history:
+        if m.get("role") in ("user", "assistant"):
+            messages.append({"role": m["role"], "content": m.get("content") or ""})
+    messages.append({
+        "role": "user",
+        "content": f"{user_turn}\n\nContext:\n{context}",
+    })
+    answer, steps = run_loop(messages, load_tools(), max_tokens)
+    return answer, trace + steps
+
+
+def answer_question(question, max_tokens):
+    """CLI one-shot: answer a question against the default KB; returns text.
+    Raises RuntimeError at the iteration cap and on API failures."""
+    answer, _ = answer_turn(question, [], default_kb_id(), max_tokens)
+    return answer
 
 
 def selftest():
@@ -230,14 +290,46 @@ def selftest():
     tr = tool_result("marker", None, {"value": 1.0})
     assert tr["content"].startswith("<tool_response>") and tr["content"].endswith("</tool_response>")
 
+    # run_loop trace shapes + tool execution, with chat() stubbed (no server/key)
+    saved_chat = globals()["chat"]
+    sequence = [
+        {"content": "", "reasoning_content": "think", "tool_calls": [
+            {"id": "call_1", "type": "function",
+             "function": {"name": "min_shear_reinf",
+                          "arguments": '{"b_w": 350, "f_c": 28, "f_yt": 420}'}}]},
+        {"content": "final answer text", "reasoning_content": "thought again"},
+    ]
+    idx = {"n": 0}
+
+    def fake_chat(messages, tools, max_tokens):
+        msg = sequence[idx["n"]]
+        idx["n"] += 1
+        return msg
+
+    globals()["chat"] = fake_chat
+    try:
+        answer, trace = run_loop(
+            [{"role": "user", "content": "q"}], load_tools(), 12000)
+    finally:
+        globals()["chat"] = saved_chat
+    assert answer == "final answer text", answer
+    kinds = [t["kind"] for t in trace]
+    assert kinds == ["reasoning", "message", "tool_call", "tool_result",
+                     "reasoning", "message", "answer"], kinds
+    tcall = trace[2]
+    assert tcall["name"] == "min_shear_reinf" and "b_w" in json.dumps(tcall["arguments"]), tcall
+    tresult = trace[3]
+    assert abs(tresult["result"]["value"] - 291.67) < 0.01, tresult  # real wrapper call
+    assert trace[-1]["kind"] == "answer" and trace[-1]["content"] == answer
+
     print("PASS")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--question", help="question to ask (default: read from stdin)")
-    parser.add_argument("--max-tokens", type=int, default=32000,
-                        help="chat completion token cap (default 32000; the model burns tokens on reasoning)")
+    parser.add_argument("--max-tokens", type=int, default=12000,
+                        help="chat completion token cap (default 12000; bounds reasoning so it can't burn the whole window and stop empty)")
     parser.add_argument("--selftest", action="store_true", help="run offline checks and exit")
     args = parser.parse_args()
 
@@ -256,7 +348,8 @@ def main():
         return 2
 
     try:
-        return run(question, args.max_tokens)
+        print(answer_question(question, args.max_tokens))
+        return 0
     except RuntimeError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1

@@ -76,6 +76,8 @@ DEFAULT_KB = "Verified OCR"
 
 
 def _api(method, path, data=None, headers=None):
+    if not os.environ.get("UNSLOTH_API_KEY"):
+        raise RuntimeError("UNSLOTH_API_KEY not set (source .env.local)")
     req = urllib.request.Request(
         API_BASE + path, method=method, data=data,
         headers={"Authorization": f"Bearer {os.environ['UNSLOTH_API_KEY']}",
@@ -84,17 +86,36 @@ def _api(method, path, data=None, headers=None):
         with urllib.request.urlopen(req) as r:
             return json.loads(r.read())
     except (urllib.error.HTTPError, urllib.error.URLError, ValueError) as e:
-        raise SystemExit(f"api {method} {path} failed: {e}") from e
+        raise RuntimeError(f"api {method} {path} failed: {e}") from e
+
+
+def list_kbs():
+    """All knowledge bases [{id, name, description, documentCount}…]."""
+    return _api("GET", "/api/rag/knowledge-bases").get("knowledgeBases", [])
+
+
+def create_kb(name, description=None):
+    return _api("POST", "/api/rag/knowledge-bases",
+                data=json.dumps({"name": name,
+                                 "description": description}).encode(),
+                headers={"Content-Type": "application/json"})
+
+
+def rename_kb(kb_id, name):
+    return _api("PATCH", f"/api/rag/knowledge-bases/{kb_id}",
+                data=json.dumps({"name": name}).encode(),
+                headers={"Content-Type": "application/json"})
+
+
+def delete_kb(kb_id):
+    return _api("DELETE", f"/api/rag/knowledge-bases/{kb_id}")
 
 
 def get_or_create_kb(name):
-    for kb in _api("GET", "/api/rag/knowledge-bases").get("knowledgeBases", []):
+    for kb in list_kbs():
         if kb["name"] == name:
             return kb["id"]
-    kb = _api("POST", "/api/rag/knowledge-bases",
-              data=json.dumps({"name": name,
-                               "description": "Verified OCR exports from seismic-ai-tools"}).encode(),
-              headers={"Content-Type": "application/json"})
+    kb = create_kb(name, "Verified OCR exports from seismic-ai-tools")
     print(f"created KB {name!r} ({kb['id']})")
     return kb["id"]
 
@@ -118,6 +139,11 @@ def docs_from_verified(verified_dir):
                 continue
             by_doc.setdefault(it["doc_id"], []).append(it)
     return by_doc
+
+
+def docs_for_doc(doc_id):
+    """Verified items for one doc_id (empty list if none/unknown)."""
+    return docs_from_verified(VERIFIED_DIR).get(doc_id, [])
 
 
 def _item_order(it):
@@ -530,16 +556,21 @@ def main():
     if "UNSLOTH_API_KEY" not in os.environ:
         raise SystemExit("UNSLOTH_API_KEY not set")
 
-    by_doc = docs_from_verified(VERIFIED_DIR)
-    if not by_doc:
-        raise SystemExit(f"no verified items in {VERIFIED_DIR}")
-    kb_id = None if args.dry_run else get_or_create_kb(args.kb)
-    for doc_id, items in sorted(by_doc.items()):
-        upload_doc(kb_id, f"{doc_id}.md", render_markdown(items), args.dry_run)
-    if not args.dry_run:
-        kbs = _api("GET", "/api/rag/knowledge-bases").get("knowledgeBases", [])
-        kb = next((k for k in kbs if k["id"] == kb_id), None)
-        print(f"KB {args.kb!r}: {kb.get('documentCount') if kb else 'unknown'} documents")
+    try:
+        by_doc = docs_from_verified(VERIFIED_DIR)
+        if not by_doc:
+            raise SystemExit(f"no verified items in {VERIFIED_DIR}")
+        kb_id = None if args.dry_run else get_or_create_kb(args.kb)
+        for doc_id, items in sorted(by_doc.items()):
+            upload_doc(kb_id, f"{doc_id}.md", render_markdown(items), args.dry_run)
+        if not args.dry_run:
+            kbs = list_kbs()
+            kb = next((k for k in kbs if k["id"] == kb_id), None)
+            print(f"KB {args.kb!r}: {kb.get('documentCount') if kb else 'unknown'} documents")
+    except RuntimeError as e:
+        # _api failures -> CLI error (exit non-zero); Flask routes wrap the
+        # same RuntimeError into JSON 502 instead.
+        raise SystemExit(f"error: {e}") from e
 
 
 if __name__ == "__main__":

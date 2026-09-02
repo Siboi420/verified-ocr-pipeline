@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chat</title>
+<script>
+window.MathJax = {tex: {inlineMath: [["\\(", "\\)"], ["$", "$"]]}};
+</script>
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js" async></script>
+<style>
+  :root { --line:#ccc; --muted:#666; --bg:#f7f7f7; }
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, sans-serif; margin: 0; background: var(--bg); color: #222; }
+  .wrap { max-width: 1400px; margin: 0 auto; padding: 16px; }
+  .muted { color: var(--muted); font-size: 13px; }
+  button { cursor: pointer; padding: 4px 10px; border: 1px solid var(--line); border-radius: 4px; background: #fff; }
+  button:hover { background: #eee; }
+  input[type=text], select, textarea { border: 1px solid var(--line); border-radius: 4px; padding: 4px 6px; font: inherit; }
+  #layout { display: flex; gap: 16px; align-items: flex-start; }
+  #side { flex: 0 0 260px; background: #fff; border: 1px solid var(--line); border-radius: 6px; padding: 12px; }
+  #side h3 { margin: 0 0 8px; font-size: 15px; }
+  #newRow { display: flex; gap: 6px; margin-bottom: 10px; }
+  #newRow input { flex: 1; min-width: 0; }
+  #sessionList { display: flex; flex-direction: column; gap: 4px; max-height: 40vh; overflow-y: auto; }
+  .sess { display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-radius: 4px; cursor: pointer; }
+  .sess:hover, .sess.active { background: #eff6ff; }
+  .sess .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
+  .sess .x { border: none; background: none; padding: 0 6px; font-size: 13px; color: var(--muted); }
+  .sess .x:hover { color: #991b1b; }
+  .sess input { flex: 1; min-width: 0; font-size: 13px; }
+  #wrap { flex: 1 1 auto; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+  #rowbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; background: #fff; border: 1px solid var(--line); border-radius: 6px; padding: 8px 12px; }
+  #thread { background: #fff; border: 1px solid var(--line); border-radius: 6px; padding: 14px; min-height: 40vh; display: flex; flex-direction: column; gap: 10px; overflow-y: auto; max-height: 68vh; }
+  .msg { max-width: 78%; padding: 8px 12px; border-radius: 8px; white-space: pre-wrap; font-size: 14px; line-height: 1.5; }
+  .msg.user { align-self: flex-end; background: #2563eb; color: #fff; }
+  .msg.assistant { align-self: flex-start; background: #f3f4f6; }
+  .tracewrap { align-self: flex-start; width: 96%; }
+  .trace { background: #0f172a; color: #d1d5db; border-radius: 8px; padding: 10px 12px; margin-top: 6px;
+           font-family: ui-monospace, Menlo, monospace; font-size: 12px; white-space: pre-wrap; word-break: break-word; }
+  .chev { cursor: pointer; user-select: none; font-size: 13px; color: var(--muted); margin-top: 4px; }
+  .chev:hover { color: #222; }
+  #inputRow { display: flex; gap: 8px; }
+  #msgInput { flex: 1; min-height: 44px; resize: vertical; }
+  #devToggle { display: flex; align-items: center; gap: 6px; }
+  .empty { color: var(--muted); text-align: center; padding: 40px 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+{% include '_header.html' %}
+<div id="layout">
+  <div id="side">
+    <h3>Sessions</h3>
+    <div id="newRow">
+      <input id="newName" type="text" placeholder="New session name…">
+      <button id="newBtn">New</button>
+    </div>
+    <div id="sessionList"></div>
+  </div>
+  <div id="wrap">
+    <div id="rowbar">
+      <label class="muted">KB
+        <select id="kbSel"><option value="">no KB</option></select>
+      </label>
+      <label class="muted" id="devToggle"><input type="checkbox" id="devMode"> Developer mode</label>
+      <span class="muted" style="margin-left:auto" id="modelHint">chat model: granite (load via the top bar)</span>
+    </div>
+    <div id="thread"></div>
+    <div id="inputRow">
+      <textarea id="msgInput" placeholder="Ask about the verified ACI chapters… (Enter sends, Shift+Enter newline)"></textarea>
+      <button id="sendBtn">Send</button>
+    </div>
+  </div>
+</div>
+</div>
+
+<script>
+const SESSION = {{ session | tojson }};
+let kbs = [];
+const $ = id => document.getElementById(id);
+
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function fmt(ts) {
+  try { return new Date(ts).toLocaleString(); } catch (e) { return ts; }
+}
+// Trace rows: pre-escaped, monospace <pre>, no MathJax
+function traceRows(trace) {
+  if (!trace || !trace.length) return '';
+  let rows = '';
+  for (const st of trace) {
+    rows += '─ ' + st.kind;
+    if (st.kind === 'retrieval') {
+      rows += '\n' + (st.chunks || []).map((c, i) => `chunk ${i + 1}:\n${c}`).join('\n\n');
+    } else if (st.kind === 'tool_call') {
+      rows += '\n  name: ' + st.name + '\n  args: ' + JSON.stringify(st.arguments);
+    } else {
+      const val = st.content ?? st.result ?? '';
+      rows += '\n' + (typeof val === 'string' ? val : JSON.stringify(val, null, 2));
+    }
+    rows += '\n';
+  }
+  return esc(rows);
+}
+function renderSessions() {
+  fetch('/api/chat/sessions').then(r => r.json()).then(({sessions}) => {
+    const list = $('sessionList');
+    list.innerHTML = '';
+    for (const s of sessions) {
+      const d = document.createElement('div');
+      d.className = 'sess' + (s.id === SESSION?.id ? ' active' : '');
+      const name = document.createElement('span');
+      name.className = 'name';
+      name.textContent = s.name;
+      name.title = s.name + '\n' + fmt(s.updated_at);
+      name.addEventListener('click', () => window.location.assign('/chat?s=' + s.id));
+      const x = document.createElement('button');
+      x.className = 'x'; x.textContent = '✕';
+      x.title = 'delete session';
+      x.addEventListener('click', e => {
+        e.stopPropagation();
+        if (!confirm('Delete session "' + s.name + '"?')) return;
+        fetch('/api/chat/sessions/' + encodeURIComponent(s.id), {method: 'DELETE'}).then(() => {
+          if (SESSION && s.id === SESSION.id) window.location.assign('/chat');
+          else renderSessions();
+        });
+      });
+      d.appendChild(name); d.appendChild(x);
+      list.appendChild(d);
+    }
+  });
+}
+function renderThread() {
+  const t = $('thread');
+  t.innerHTML = '';
+  if (!SESSION || !SESSION.messages.length) {
+    t.appendChild(Object.assign(document.createElement('div'), {className:'empty', textContent:'No messages yet. Ask below.'}));
+    return;
+  }
+  for (const m of SESSION.messages) {
+    const d = document.createElement('div');
+    d.className = 'msg ' + m.role;
+    d.textContent = m.content;
+    t.appendChild(d);
+  }
+  t.scrollTop = t.scrollHeight;
+}
+function renderTrace(trace) {
+  const t = $('thread');
+  const wrap = document.createElement('div');
+  wrap.className = 'tracewrap';
+  const chev = document.createElement('div');
+  chev.className = 'chev';
+  chev.textContent = '▸ developer trace';
+  chev.addEventListener('click', () => {
+    const pre = wrap.querySelector('pre');
+    if (!pre) return;
+    if (pre.hidden) { pre.hidden = false; chev.textContent = '▾ developer trace'; }
+    else { pre.hidden = true; chev.textContent = '▸ developer trace'; }
+  });
+  const pre = document.createElement('pre');
+  pre.className = 'trace';
+  pre.hidden = true;
+  pre.textContent = traceRows(trace);
+  wrap.appendChild(chev); wrap.appendChild(pre);
+  t.appendChild(wrap);
+  t.scrollTop = t.scrollHeight;
+}
+function loadKBs() {
+  window.kbFetch().then(j => {
+    kbs = (j.knowledgeBases || []).slice();    const sel = $('kbSel');
+    sel.innerHTML = '<option value="">no KB</option>';
+    for (const k of kbs) {
+      const o = document.createElement('option');
+      o.value = k.id; o.textContent = k.name;
+      sel.appendChild(o);
+    }
+    // restore the session's KB selection
+    if (SESSION) {
+      const i = kbs.findIndex(k => k.id === SESSION.kb_id);
+      sel.selectedIndex = i >= 0 ? i + 1 : 0;
+    }
+  });
+}
+async function sendMessage() {
+  const inp = $('msgInput');
+  const content = inp.value.trim();
+  if (!content || !SESSION) return;
+  inp.value = '';
+  const dev = $('devMode').checked;
+  const userDiv = Object.assign(document.createElement('div'), {className:'msg user', textContent: content});
+  $('thread').appendChild(userDiv);
+  const busyMsg = Object.assign(document.createElement('div'), {className:'msg assistant', textContent:'…'});
+  $('thread').appendChild(busyMsg);
+  $('thread').scrollTop = $('thread').scrollHeight;
+  $('sendBtn').disabled = true;
+  try {
+    const r = await fetch('/api/chat/sessions/' + encodeURIComponent(SESSION.id) + '/messages', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({content, developer: dev})
+    });
+    const j = await r.json();
+    if (!r.ok) {
+      busyMsg.textContent = 'error: ' + (j.error || r.status);
+      return;
+    }
+    busyMsg.textContent = j.answer;
+    if (dev && j.trace) renderTrace(j.trace);
+    SESSION.messages = j.session.messages;
+    // persist the session's KB selection (per-session KB)
+    const kb = $('kbSel').value;
+    if (SESSION.kb_id !== kb) {
+      const pr = await fetch('/api/chat/sessions/' + encodeURIComponent(SESSION.id), {
+        method: 'PATCH', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({kb_id: kb || null})
+      });
+      if (pr.ok) { SESSION.kb_id = kb || null; }
+    }
+    $('thread').scrollTop = $('thread').scrollHeight;
+  } catch (e) {
+    busyMsg.textContent = 'error: ' + e;
+  } finally {
+    $('sendBtn').disabled = false;
+  }
+}
+
+$('newBtn').addEventListener('click', () => {
+  const name = $('newName').value.trim();
+  if (!name) return;
+  fetch('/api/chat/sessions', {method: 'POST',
+    headers: {'Content-Type': 'application/json'}, body: JSON.stringify({name})})
+    .then(r => r.json())
+    .then(s => window.location.assign('/chat?s=' + s.id));
+});
+$('sendBtn').addEventListener('click', sendMessage);
+$('msgInput').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+});
+$('kbSel').addEventListener('change', () => {
+  if (!SESSION) return;
+  fetch('/api/chat/sessions/' + encodeURIComponent(SESSION.id), {
+    method: 'PATCH', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({kb_id: $('kbSel').value || null})
+  }).then(r => r.json()).then(s => { if (s && s.kb_id !== undefined) SESSION.kb_id = s.kb_id; });
+});
+
+renderSessions();
+loadKBs();
+renderThread();
+</script>
+</body>
+</html>

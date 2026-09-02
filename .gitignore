@@ -13,5 +13,8 @@ validation/uploads/
 *.env
 .env*
 
+# chat sessions (one JSON file per session)
+sessions/
+
 # logs
 *.log

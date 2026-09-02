@@ -58,15 +58,18 @@ window.MathJax = {tex: {inlineMath: [["\\(", "\\)"], ["$", "$"]]}};
 </head>
 <body>
 <div class="wrap">
-<header>
-  <h1>OCR Validation</h1>
-  {% if doc %}<span class="pill">{{ doc.source_name }}</span>
+{% include '_header.html' %}
+
+{% if doc %}
+<div class="card row" style="margin-bottom:12px">
+  <span class="pill">{{ doc.source_name }}</span>
   <span class="muted" id="counter"></span>
   <span class="muted" id="ocrCoverage"></span>
   <label class="muted">OCR more:
     <input id="ocrMorePages" size="6" placeholder="e.g. 5-15"></label>
-  <button id="ocrMoreBtn">OCR more pages</button>{% endif %}
-</header>
+  <button id="ocrMoreBtn">OCR more pages</button>
+</div>
+{% endif %}
 
 {% if doc %}
 <div id="ocrbar" class="err"></div>
@@ -101,6 +104,13 @@ window.MathJax = {tex: {inlineMath: [["\\(", "\\)"], ["$", "$"]]}};
   <button id="bulkRejectText" title="reject all plain text items on this page">Reject text</button>
   <button id="discardBtn" title="delete this document from the queue">Discard document</button>
   <a href="/"><button>‹ documents</button></a>
+</div>
+<div class="card row" style="margin-bottom:12px">
+  <label class="muted">Upload verified items → KB
+    <select id="upKbSel"><option value="">…</option></select>
+  </label>
+  <button id="upKbBtn">Upload verified → KB</button>
+  <span class="muted" id="upKbMsg"></span>
 </div>
 <div id="main">
   <div id="pane">
@@ -153,6 +163,19 @@ window.MathJax = {tex: {inlineMath: [["\\(", "\\)"], ["$", "$"]]}};
     {% endfor %}
   </table>
   {% else %}<span class="muted">No documents yet.</span>{% endif %}
+</div>
+<div class="card">
+  <h3>Knowledge Bases <span class="muted" id="kbMsg"></span></h3>
+  <div class="row" style="margin-bottom:10px">
+    <input type="text" id="kbName" placeholder="New KB name…" size="24">
+    <button id="kbCreateBtn">Create</button>
+    <button id="kbRefreshBtn">Refresh</button>
+  </div>
+  <table style="width:100%; border-collapse:collapse">
+    <tr class="muted"><th align="left">name</th><th>docs</th><th></th></tr>
+    <tbody id="kbBody"></tbody>
+  </table>
+  <div class="muted" id="kbDetail"></div>
 </div>
 {% endif %}
 </div>
@@ -1012,6 +1035,110 @@ document.addEventListener("click", async e => {
     }
   });
 })();
+</script>
+
+<script>
+// ---- KB manager (list page) + upload-verified (doc page) ----
+async function apiJson(url, opts) {
+  const r = await fetch(url, Object.assign({headers: {"Content-Type": "application/json"}}, opts || {}));
+  let j = {};
+  try { j = await r.json(); } catch (e) {}
+  return {ok: r.ok, status: r.status, ...j};
+}
+function escHtml(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
+}
+function kbMsg(s, cls) {
+  const el = document.getElementById("kbMsg");
+  if (el) el.textContent = s;
+  const up = document.getElementById("upKbMsg");
+  if (up) up.textContent = s;
+}
+// fill the doc-page upload selector (guarded: element only exists on the doc page)
+window.fillUpKbSel = async function() {
+  const sel = document.getElementById("upKbSel");
+  if (!sel) return;
+  const j = await window.kbFetch();
+  sel.innerHTML = "";
+  if (!j.ok || !j.knowledgeBases.length) {
+    const o = document.createElement("option");
+    o.value = ""; o.textContent = "(no KBs)";
+    sel.appendChild(o);
+    return;
+  }
+  for (const k of j.knowledgeBases) {
+    const o = document.createElement("option");
+    o.value = k.id; o.textContent = k.name + " (" + k.documentCount + " docs)";
+    sel.appendChild(o);
+  }
+};
+// list-page KB manager table
+window.kbRefresh = async function() {
+  const body = document.getElementById("kbBody");
+  if (!body) return;
+  body.innerHTML = "";
+  const j = await window.kbFetch();
+  if (!j.ok) { kbMsg("KB list failed (is Unsloth :8888 up?)"); return; }
+  kbMsg("");
+  const kbs = j.knowledgeBases || [];
+  if (!kbs.length) { body.innerHTML = '<tr><td colspan="3" class="muted">no knowledge bases yet</td></tr>'; return; }
+  for (const k of kbs) {
+    const tr = document.createElement("tr");
+    const nameTd = document.createElement("td");
+    nameTd.textContent = k.name;
+    const nTd = document.createElement("td");
+    nTd.setAttribute("align", "center");
+    nTd.textContent = k.documentCount ?? 0;
+    const actTd = document.createElement("td");
+    actTd.setAttribute("align", "right");
+    const ren = document.createElement("button");
+    ren.textContent = "✎"; ren.title = "rename";
+    ren.addEventListener("click", async () => {
+      const name = prompt("Rename KB to:", k.name);
+      if (!name) return;
+      const r = await apiJson("/api/kb/" + encodeURIComponent(k.id), {method: "PATCH", body: JSON.stringify({name})});
+      kbMsg(r.ok ? "renamed" : "rename failed: " + (r.error || r.status));
+      window.kbRefresh();
+    });
+    const del = document.createElement("button");
+    del.textContent = "✕"; del.title = "delete (whole KB)";
+    del.addEventListener("click", async () => {
+      if (!confirm("Delete knowledge base \"" + k.name + "\" and its documents?")) return;
+      const r = await apiJson("/api/kb/" + encodeURIComponent(k.id), {method: "DELETE"});
+      kbMsg(r.ok ? "deleted " + k.name : "delete failed: " + (r.error || r.status));
+      window.kbRefresh();
+    });
+    actTd.appendChild(ren); actTd.appendChild(del);
+    tr.appendChild(nameTd); tr.appendChild(nTd); tr.appendChild(actTd);
+    body.appendChild(tr);
+  }
+};
+const kbCreateBtn = document.getElementById("kbCreateBtn");
+if (kbCreateBtn) kbCreateBtn.addEventListener("click", async () => {
+  const name = document.getElementById("kbName").value.trim();
+  if (!name) return;
+  const r = await apiJson("/api/kb", {method: "POST", body: JSON.stringify({name})});
+  kbMsg(r.ok ? "created " + name : "create failed: " + (r.error || r.status));
+  document.getElementById("kbName").value = "";
+  window.kbRefresh();
+});
+const kbRefreshBtn = document.getElementById("kbRefreshBtn");
+if (kbRefreshBtn) kbRefreshBtn.addEventListener("click", window.kbRefresh);
+const upKbBtn = document.getElementById("upKbBtn");
+if (upKbBtn) upKbBtn.addEventListener("click", async () => {
+  const sel = document.getElementById("upKbSel");
+  if (!sel || !sel.value) { kbMsg("pick a KB first"); return; }
+  kbMsg("uploading…");
+  upKbBtn.disabled = true;
+  try {
+    const r = await apiJson("/api/kb/" + encodeURIComponent(sel.value) + "/upload",
+      {method: "POST", body: JSON.stringify({doc_id: DOC.doc_id})});
+    kbMsg(r.ok ? "uploaded: " + (r.uploaded || []).join(", ") + " (skipped " + (r.skipped ?? 0) + ")"
+              : "upload failed: " + (r.error || r.status));
+  } finally { upKbBtn.disabled = false; }
+});
+if (document.getElementById("kbBody")) window.kbRefresh();
+if (document.getElementById("upKbSel")) window.fillUpKbSel();
 </script>
 </body>
 </html>

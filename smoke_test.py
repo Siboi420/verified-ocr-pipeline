@@ -545,6 +545,273 @@ def main():
 
     client.post("/doc/merge/discard")
 
+    # ---------- new: chat sessions, KB routes, model swap (all stubbed) ----------
+    import tempfile
+    import shutil
+    import importlib
+
+    # --- chat session CRUD (temp sessions/ dir) ---
+    saved_sdir = appmod.SESSIONS_DIR
+    tmpd = tempfile.mkdtemp(prefix="sess_")
+    appmod.SESSIONS_DIR = Path(tmpd)
+    try:
+        r = client.post("/api/chat/sessions", json={"name": "first"})
+        check(r.status_code == 201, "create session 201")
+        sid = r.get_json()["id"]
+        r = client.get("/api/chat/sessions")
+        check(r.status_code == 200 and len(r.get_json()["sessions"]) == 1,
+              "session created -> listed")
+        r = client.patch(f"/api/chat/sessions/{sid}", json={"name": "renamed"})
+        check(r.status_code == 200 and r.get_json()["name"] == "renamed",
+              "rename session")
+        r = client.patch(f"/api/chat/sessions/{sid}", json={"kb_id": "kb1"})
+        check(r.get_json()["kb_id"] == "kb1", "session kb_id set")
+        r = client.patch(f"/api/chat/sessions/{sid}", json={"kb_id": None})
+        check(r.get_json()["kb_id"] is None, "session kb_id cleared with null")
+        r = client.get(f"/api/chat/sessions/{sid}")
+        check(r.status_code == 200 and r.get_json()["messages"] == []
+              and r.get_json()["name"] == "renamed", "get session")
+        check(client.post("/api/chat/sessions", json={}).status_code == 400,
+              "create session no name -> 400")
+        check(client.post("/api/chat/sessions", json={"name": "  "}).status_code == 400,
+              "create session blank name -> 400")
+        check(client.get("/api/chat/sessions/nope").status_code == 404,
+              "get missing session -> 404")
+        check(client.patch("/api/chat/sessions/bad'id", json={"name": "x"}).status_code == 404,
+              "patch malformed sid -> 404")
+        check(client.patch(f"/api/chat/sessions/{sid}", json={"name": ""}).status_code == 400,
+              "rename to empty -> 400")
+        check(client.delete(f"/api/chat/sessions/{sid}").status_code == 200,
+              "delete session 200")
+        check(client.get(f"/api/chat/sessions/{sid}").status_code == 404,
+              "deleted session -> 404")
+    finally:
+        appmod.SESSIONS_DIR = saved_sdir
+        shutil.rmtree(tmpd, ignore_errors=True)
+
+    # --- chat message route (answer_turn stubbed) ---
+    saved_ans = appmod.orchestrator.answer_turn
+
+    def fake_answer_turn(user_turn, history, kb_id, max_tokens):
+        return f"echo:{user_turn}:{kb_id}", [
+            {"kind": "retrieval", "chunks": ["c1", "c2", "c3"]},
+            {"kind": "message", "content": user_turn},
+            {"kind": "answer", "content": f"echo:{user_turn}:{kb_id}"},
+        ]
+
+    appmod.orchestrator.answer_turn = fake_answer_turn
+    try:
+        s = client.post("/api/chat/sessions", json={"name": "chat1"}).get_json()
+        sid = s["id"]
+        r = client.post(f"/api/chat/sessions/{sid}/messages", json={"content": "hello"})
+        check(r.status_code == 200, "chat message 200")
+        j = r.get_json()
+        check(j["answer"] == "echo:hello:None",
+              "answer echoed, kb_id=None when unset")
+        check("trace" not in j, "no trace key without developer flag")
+        s2 = client.get(f"/api/chat/sessions/{sid}").get_json()
+        check([m["role"] for m in s2["messages"]] == ["user", "assistant"],
+              "history persisted after turn")
+        check(s2["messages"][0]["content"] == "hello"
+              and s2["messages"][1]["content"] == j["answer"],
+              "message contents persisted")
+        r = client.post(f"/api/chat/sessions/{sid}/messages",
+                        json={"content": "again", "developer": True})
+        j = r.get_json()
+        kinds = [t["kind"] for t in j["trace"]]
+        check(kinds == ["retrieval", "message", "answer"],
+              f"developer=true returns trace kinds {kinds}")
+        # kb selection threads through to answer_turn
+        client.patch(f"/api/chat/sessions/{sid}", json={"kb_id": "kbab"})
+        r = client.post(f"/api/chat/sessions/{sid}/messages", json={"content": "withkb"})
+        check(r.get_json()["answer"] == "echo:withkb:kbab",
+              "session kb_id threaded through answer_turn")
+        r = client.post(f"/api/chat/sessions/{sid}/messages", json={"content": "h3"})
+        check(len(r.get_json()["session"]["messages"]) == 8,
+              "eight messages persisted across four turns")
+        check(client.post(f"/api/chat/sessions/{sid}/messages", json={}).status_code == 400,
+              "empty content -> 400")
+        check(client.post("/api/chat/sessions/nope/messages",
+                          json={"content": "x"}).status_code == 404,
+              "message to missing session -> 404")
+    finally:
+        appmod.orchestrator.answer_turn = saved_ans
+
+    # --- KB routes (rag_uploader._api stubbed) ---
+    api_calls = []
+
+    def fake_api(method, path, data=None, headers=None):
+        api_calls.append((method, path))
+        if method == "GET" and path == "/api/rag/knowledge-bases":
+            return {"knowledgeBases": [
+                {"id": "k1", "name": "Verified OCR", "description": "d", "documentCount": 3},
+                {"id": "k2", "name": "OpenSees", "description": "e", "documentCount": 9}]}
+        if method == "POST" and path == "/api/rag/knowledge-bases":
+            return {"id": "knew", "name": json.loads(data or b"{}")["name"], "documentCount": 0}  # type: ignore[arg-type]
+        if method == "PATCH":
+            return {"id": path.rsplit("/", 1)[-1], "name": json.loads(data or b"{}")["name"]}  # type: ignore[arg-type]
+        if method == "DELETE":
+            return {"ok": True}
+        if path.endswith("/documents"):  # multipart POST data is bytes
+            return {"id": "doc1", "status": "queued", "documentId": "abc"}
+        return {}
+
+    ragmod = appmod.rag
+    saved_api = ragmod._api
+    ragmod._api = fake_api
+    # KB upload tests must not depend on this machine's real verified/ content:
+    # a temp dir holding only the smoke doc's verified items.
+    verified_tmp = Path(tempfile.mkdtemp(prefix="verified_"))
+    (verified_tmp / "smoke").mkdir()
+    for f in (REPO / "validation" / "verified" / "smoke").glob("*.json"):
+        (verified_tmp / "smoke" / f.name).write_bytes(f.read_bytes())
+    saved_vdir = ragmod.VERIFIED_DIR
+    ragmod.VERIFIED_DIR = verified_tmp
+    try:
+        r = client.get("/api/kb")
+        check(r.status_code == 200, "KB list 200")
+        kbs = r.get_json()["knowledgeBases"]
+        check([k["name"] for k in kbs] == ["Verified OCR", "OpenSees"], "KB list names")
+        check(kbs[0]["documentCount"] == 3, "KB list documentCount")
+        r = client.post("/api/kb", json={"name": "New KB"})
+        check(r.status_code == 201 and r.get_json()["id"] == "knew", "KB create 201")
+        check(("POST", "/api/rag/knowledge-bases") in api_calls, "KB create -> POST knowledge-bases")
+        r = client.patch("/api/kb/k1", json={"name": "Renamed"})
+        check(r.status_code == 200 and r.get_json()["name"] == "Renamed", "KB rename 200")
+        check(("PATCH", "/api/rag/knowledge-bases/k1") in api_calls, "KB rename -> PATCH")
+        r = client.delete("/api/kb/k1")
+        check(r.status_code == 200 and r.get_json() == {"ok": True}, "KB delete 200")
+        check(("DELETE", "/api/rag/knowledge-bases/k1") in api_calls, "KB delete -> DELETE")
+        check(client.post("/api/kb", json={"name": " "}).status_code == 400,
+              "KB create blank name -> 400")
+        check(client.patch("/api/kb/k1", json={"name": ""}).status_code == 400,
+              "KB rename empty -> 400")
+        check(client.post("/api/kb/bad'id/upload", json={"doc_id": "x"}).status_code == 404,
+              "KB upload bad kb id -> 404")
+        # upload single verified doc (smoke doc has an accepted text item now)
+        api_calls.clear()
+        r = client.post("/api/kb/k1/upload", json={"doc_id": "smoke"})
+        check(r.status_code == 200 and r.get_json()["uploaded"] == ["smoke.md"],
+              "KB single-doc upload -> uploaded [smoke.md]")
+        check(any(p.endswith("/documents") for _, p in api_calls),
+              "single-doc upload hits documents endpoint")
+        api_calls.clear()
+        r = client.post("/api/kb/k1/upload", json={"doc_id": "__all__"})
+        j = r.get_json()
+        check(r.status_code == 200 and j["uploaded"] == ["smoke.md"] and j["skipped"] == 0,
+              "__all__ upload -> [smoke.md], skipped 0")
+        r = client.post("/api/kb/k1/upload", json={"doc_id": "nope"})
+        check(r.status_code == 404, "upload unknown doc -> 404")
+    finally:
+        ragmod._api = saved_api
+        ragmod.VERIFIED_DIR = saved_vdir
+        shutil.rmtree(verified_tmp, ignore_errors=True)
+
+    # --- model routes (models.current_model/unload/load stubbed) ---
+    model_state: dict = {"loaded": None}
+    model_calls = []
+    model_jobsteps = []
+
+    def _running_step():
+        # the worker sets the step right before calling the stub, so the
+        # in-memory snapshot is race-free (only one model job in flight)
+        for jid, job in appmod.JOBS.items():
+            if job.get("status") == "running":
+                return job.get("step", "")
+        return ""
+
+    def fake_current():
+        return model_state["loaded"]
+
+    def fake_unload(path, force=True):
+        model_calls.append(("unload", path))
+        model_jobsteps.append("unload-step:" + _running_step())
+
+    def fake_load(key):
+        model_calls.append(("load", key))
+        model_jobsteps.append("load-step:" + _running_step())
+    saved_m = (appmod.models.current_model, appmod.models.unload, appmod.models.load)
+    appmod.models.current_model = fake_current
+    appmod.models.unload = fake_unload
+    appmod.models.load = fake_load
+
+    def wait_job(jid):
+        job = {}
+        for _ in range(100):
+            job = client.get(f"/jobs/{jid}").get_json()
+            if job["status"] != "running":
+                break
+            time.sleep(0.05)
+        return job
+
+    try:
+        r = client.get("/api/model")
+        check(r.status_code == 200 and r.get_json()["loaded"] is None
+              and r.get_json()["key"] is None, "GET /api/model with nothing loaded")
+        model_state["loaded"] = "ggml-org/GLM-OCR-GGUF"
+        r = client.get("/api/model")
+        check(r.get_json()["key"] == "ocr", "/api/model key resolves ocr by suffix")
+        # (a) already loaded -> short-circuit, no job, no unload/load calls
+        model_calls.clear()
+        r = client.post("/api/model/load", json={"model": "ocr"})
+        check(r.status_code == 200 and r.get_json()["status"] == "done"
+              and r.get_json()["step"] == "already loaded", "already-loaded short-circuits")
+        check(model_calls == [], "already-loaded issues no unload/load calls")
+        check(client.post("/api/model/load", json={"model": "wat"}).status_code == 400,
+              "unknown model key -> 400")
+        # (b) cold: unload ALWAYS precedes load, steps unloading->loading->done
+        model_state["loaded"] = None
+        model_calls.clear()
+        model_jobsteps.clear()
+        r = client.post("/api/model/load", json={"model": "chat"})
+        jid = r.get_json()["job_id"]
+        job = wait_job(jid)
+        check(job["status"] == "done" and "loaded granite" in job["step"],
+              "cold job ends done/loaded granite")
+        check(model_calls == [("unload", None), ("load", "chat")],
+              f"cold swap calls unload() before load() ({model_calls})")
+        check(any(s.startswith("unload-step:unloading") for s in model_jobsteps),
+              "unload() saw job in unloading step")
+        check(any(s.startswith("load-step:loading") for s in model_jobsteps),
+              "load() saw job in loading step")
+        # warm (GLM loaded -> chat): unload gets the GLM path first
+        model_state["loaded"] = "ggml-org/GLM-OCR-GGUF"
+        model_calls.clear()
+        r = client.post("/api/model/load", json={"model": "chat"})
+        jid = r.get_json()["job_id"]
+        job = wait_job(jid)
+        check(job["status"] == "done", "warm swap ends done")
+        check(model_calls == [("unload", "ggml-org/GLM-OCR-GGUF"), ("load", "chat")],
+              "warm swap unloads GLM-OCR path before loading chat")
+        # (c) load error -> error status propagated
+        model_state["loaded"] = None
+        model_calls.clear()
+
+        def boom_load(key):
+            model_calls.append(("load", key))
+            raise RuntimeError("boom")
+
+        appmod.models.load = boom_load
+        r = client.post("/api/model/load", json={"model": "ocr"})
+        jid = r.get_json()["job_id"]
+        job = wait_job(jid)
+        check(job["status"] == "error" and "boom" in job["error"],
+              "load error -> job error status propagated")
+        check(model_calls == [("unload", None), ("load", "ocr")],
+              "error path still unloads before loading")
+    finally:
+        appmod.models.current_model, appmod.models.unload, appmod.models.load = saved_m
+
+    # --- shared header: tabs + model control on both pages ---
+    r = client.get("/")
+    h = r.get_data(as_text=True)
+    check('<a href="/" class="active">OCR Validation</a>' in h
+          and 'id="loadOcrBtn"' in h, "/ renders active OCR tab + model control")
+    r = client.get("/chat")
+    h = r.get_data(as_text=True)
+    check('<a href="/chat" class="active">Chat</a>' in h
+          and 'id="loadChatBtn"' in h, "/chat renders active Chat tab + model control")
+
     # discard document: pending record + verified/rejected item copies removed
     r = client.post(f"/doc/{doc_id}/discard")
     check(r.status_code == 200 and not (REPO / "validation" / "pending" / f"{doc_id}.json").exists(),

@@ -1,0 +1,117 @@
+{# Shared top bar: browser-style tabs, model status chip + load buttons, and
+   a toast container. Included by index.html (page_model="ocr") and chat.html
+   (page_model="chat"). The page's own model gets the primary button styling.
+   Jinja includes inherit the render context, so page_model arrives from the
+   route. #}
+<style>
+  .topbar { display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+  .tabs { display: flex; gap: 4px; }
+  .tabs a { text-decoration: none; padding: 6px 16px; border: 1px solid var(--line, #ccc);
+            border-bottom: none; border-radius: 6px 6px 0 0; background: #fff; color: #222;
+            font-size: 14px; }
+  .tabs a.active { background: #2563eb; border-color: #2563eb; color: #fff; }
+  #modelBar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-left: auto; padding-bottom: 2px; }
+  #modelBar .muted { font-size: 12px; }
+  #modelChip { font-size: 12px; background: #eef2ff; border: 1px solid var(--line, #ccc);
+               border-radius: 10px; padding: 2px 10px; max-width: 340px; overflow: hidden;
+               text-overflow: ellipsis; white-space: nowrap; }
+  #modelChip.loaded { background: #ecfdf5; color: #065f46; }
+  #modelBar button { font-size: 12px; padding: 3px 10px; }
+  #modelBar button.primary { background: #2563eb; color: #fff; border-color: #2563eb; }
+  #modelBar button:disabled { opacity: .5; cursor: default; }
+  #toasts { position: fixed; top: 10px; right: 10px; z-index: 99; display: flex;
+            flex-direction: column; gap: 6px; max-width: 420px; }
+  .toast { background: #111827; color: #fff; padding: 8px 12px; border-radius: 6px;
+           font-size: 13px; box-shadow: 0 2px 8px rgba(0,0,0,.25); white-space: pre-wrap; }
+  .toast.error { background: #991b1b; }
+  .toast.done { background: #065f46; }
+</style>
+
+<div class="topbar">
+  <nav class="tabs">
+    <a href="/" class="{{ 'active' if tab is defined and tab == 'ocr' else '' }}">OCR Validation</a>
+    <a href="/chat" class="{{ 'active' if tab is defined and tab == 'chat' else '' }}">Chat</a>
+  </nav>
+  <div id="modelBar">
+    <span class="muted">Model:</span>
+    <span id="modelChip">…</span>
+    <button id="loadOcrBtn" class="{{ 'primary' if page_model == 'ocr' else '' }}"
+            onclick="loadModel('ocr','GLM-OCR')">Load GLM-OCR</button>
+    <button id="loadChatBtn" class="{{ 'primary' if page_model == 'chat' else '' }}"
+            onclick="loadModel('chat','granite')">Load granite</button>
+  </div>
+</div>
+<div id="toasts"></div>
+
+<script>
+// ---- shared widgets: model bar + toasts + KB fetch (both pages use these) ----
+let progressToast = null;
+function toast(msg, cls) {
+  const t = document.createElement('div');
+  t.className = 'toast' + (cls ? ' ' + cls : '');
+  t.textContent = msg;
+  document.getElementById('toasts').appendChild(t);
+  setTimeout(() => t.remove(), 6000);
+}
+function progress(msg) {
+  if (!progressToast) {
+    progressToast = document.createElement('div');
+    progressToast.className = 'toast';
+    document.getElementById('toasts').appendChild(progressToast);
+  }
+  progressToast.textContent = msg;
+}
+function clearProgress() {
+  if (progressToast) { progressToast.remove(); progressToast = null; }
+}
+async function modelState() {
+  try {
+    const r = await fetch('/api/model');
+    const j = await r.json();
+    const chip = document.getElementById('modelChip');
+    chip.textContent = j.loaded ? j.loaded : 'none loaded';
+    chip.classList.toggle('loaded', !!j.loaded);
+  } catch (e) { /* backend down: leave the chip as-is */ }
+}
+async function loadModel(key, name) {
+  const btns = document.querySelectorAll('#modelBar button');
+  const busy = Array.from(btns).some(b => b.disabled);
+  if (busy) return;
+  btns.forEach(b => b.disabled = true);
+  try {
+    const r = await fetch('/api/model/load', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body: JSON.stringify({model:key})});
+    const j = await r.json();
+    if (j.status === 'done') {
+      toast(j.step === 'already loaded' ? name + ' already loaded' : j.step, 'done');
+      modelState();
+    } else if (j.error) {
+      toast('error: ' + j.error, 'error');
+    } else if (j.job_id) {
+      for (;;) {
+        const jr = await fetch('/jobs/' + j.job_id);
+        const st = await jr.json();
+        if (st.status === 'running') { progress(st.step || '…'); }
+        else if (st.status === 'done') { clearProgress(); toast(st.step, 'done'); modelState(); break; }
+        else { clearProgress(); toast('✗ ' + st.error, 'error'); break; }
+        await new Promise(res => setTimeout(res, 1500));
+      }
+    }
+  } catch (e) {
+    clearProgress();
+    toast('error: ' + e, 'error');
+  } finally {
+    btns.forEach(b => b.disabled = false);
+  }
+}
+// KB fetch helper: returns {ok, knowledgeBases} or {ok:false}
+window.kbFetch = async function() {
+  try {
+    const r = await fetch('/api/kb');
+    const j = await r.json();
+    j.ok = r.ok;  // api/kb response has no ok field
+    return j;
+  } catch (e) { return {ok:false, knowledgeBases:[]}; }
+};
+modelState();  // chip on page load
+</script>
