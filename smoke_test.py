@@ -2,8 +2,8 @@
 
 Covers PLAN verification cases 2-4 minus the actual GLM-OCR call:
   - load by paths -> items parsed, page PNG renders
-  - accept (edited table) -> validation/verified/<item_id>.json
-  - reject equation -> validation/rejected/
+  - accept (edited table) -> validation/verified/<doc_id>/<item_id>.json
+  - reject equation -> validation/rejected/<doc_id>/
   - skip -> stays pending, status=skipped
   - upload without .md -> ocr_needed=true; /ocr returns job_id immediately;
     with UNSLOTH_API_KEY unset the job errors with a clear message
@@ -143,7 +143,7 @@ def main():
     r = client.post(f"/item/{doc_id}/{table_id}/action",
                     json={"action": "accept", "content": EDITED_TABLE})
     check(r.status_code == 200, "accept edited table 200")
-    verified = read_json(REPO / "validation" / "verified" / f"{table_id}.json")
+    verified = read_json(REPO / "validation" / "verified" / "smoke" / f"{table_id}.json")
     check(verified["content"] == EDITED_TABLE, "verified JSON holds edited markdown")
     check(verified["type"] == "table" and verified["page"] == 1, "verified metadata correct")
     check(verified.get("caption") == "Table 1.2—Member capacities",
@@ -163,9 +163,9 @@ def main():
     pending = read_json(REPO / "validation" / "pending" / "smoke.json")
     check(next(i for i in pending["pages"][0]["items"] if i["id"] == table_id)["status"] == "rejected",
           "flip updates status to rejected")
-    check((REPO / "validation" / "rejected" / f"{table_id}.json").exists(),
+    check((REPO / "validation" / "rejected" / "smoke" / f"{table_id}.json").exists(),
           "flip writes rejected copy")
-    check(not (REPO / "validation" / "verified" / f"{table_id}.json").exists(),
+    check(not (REPO / "validation" / "verified" / "smoke" / f"{table_id}.json").exists(),
           "flip removes stale verified copy")
     r = client.post(f"/item/{doc_id}/{table_id}/action", json={"action": "accept"})
     check(r.status_code == 200, "flip rejected->verified 200")
@@ -179,7 +179,7 @@ def main():
                     json={"action": "accept", "content": span_md,
                           "table_spans": [{"r": 2, "c": 0, "rs": 2, "cs": 1}]})
     check(r.status_code == 200, "accept table with table_spans 200")
-    verified = read_json(REPO / "validation" / "verified" / f"{table_id}.json")
+    verified = read_json(REPO / "validation" / "verified" / "smoke" / f"{table_id}.json")
     check(verified.get("table_spans") == [{"r": 2, "c": 0, "rs": 2, "cs": 1}],
           "verified JSON carries table_spans")
     check(verified["content"] == span_md, "verified content keeps markdown table")
@@ -192,7 +192,7 @@ def main():
     r = client.post(f"/item/{doc_id}/{table_id}/action",
                     json={"action": "accept", "content": "| X |\n|---|\n| y |",
                           "table_spans": []})
-    verified = read_json(REPO / "validation" / "verified" / f"{table_id}.json")
+    verified = read_json(REPO / "validation" / "verified" / "smoke" / f"{table_id}.json")
     check(r.status_code == 200 and verified["content"].startswith("| X |")
           and verified.get("table_spans") == [],
           "re-accepting a verified table with new content updates it")
@@ -204,20 +204,20 @@ def main():
                     json={"action": "accept", "content": eq_content,
                           "eq_num": "22.5.1.10", "eq_letters": "a"})
     check(r.status_code == 200, "accept equation with eq key 200")
-    ev = read_json(REPO / "validation" / "verified" / f"{eq_id}.json")
+    ev = read_json(REPO / "validation" / "verified" / "smoke" / f"{eq_id}.json")
     check(ev.get("eq_num") == "22.5.1.10" and ev.get("eq_letters") == "a",
           "verified JSON carries eq_num/eq_letters")
     # re-accept with content only: the key survives (the bug fix)
     r = client.post(f"/item/{doc_id}/{eq_id}/action",
                     json={"action": "accept", "content": eq_content})
     check(r.status_code == 200, "re-accept equation 200")
-    ev = read_json(REPO / "validation" / "verified" / f"{eq_id}.json")
+    ev = read_json(REPO / "validation" / "verified" / "smoke" / f"{eq_id}.json")
     check(ev.get("eq_num") == "22.5.1.10",
           "re-accept with content only preserves the eq key")
     # empty eq_num clears the key (item-level; export drops the coupled eq_letters too)
     r = client.post(f"/item/{doc_id}/{eq_id}/action",
                     json={"action": "accept", "content": eq_content, "eq_num": ""})
-    ev = read_json(REPO / "validation" / "verified" / f"{eq_id}.json")
+    ev = read_json(REPO / "validation" / "verified" / "smoke" / f"{eq_id}.json")
     check(r.status_code == 200 and ev.get("eq_num") is None, "empty eq_num clears the key")
     pd0 = read_json(REPO / "validation" / "pending" / "smoke.json")
     pending_eq = next(i for i in pd0["pages"][0]["items"] if i["id"] == eq_id)
@@ -225,7 +225,7 @@ def main():
           "item keeps eq_letters when only eq_num is cleared")
     # reject equation -> rejected/
     r = client.post(f"/item/{doc_id}/{eq_id}/action", json={"action": "reject"})
-    check(r.status_code == 200 and (REPO / "validation" / "rejected" / f"{eq_id}.json").exists(),
+    check(r.status_code == 200 and (REPO / "validation" / "rejected" / "smoke" / f"{eq_id}.json").exists(),
           "reject equation -> rejected/")
 
     # skip -> stays pending, status=skipped
@@ -240,7 +240,7 @@ def main():
     r = client.post(f"/item/{doc_id}/{text_id}/action",
                     json={"action": "accept", "content": text_payload})
     check(r.status_code == 200, "accept text item 200")
-    tv = read_json(REPO / "validation" / "verified" / f"{text_id}.json")
+    tv = read_json(REPO / "validation" / "verified" / "smoke" / f"{text_id}.json")
     # pi-lens-ignore: no-identity-operator-on-literals
     check(tv["content"] == "\n\nThis is the frame capacity prose.\n",
           "accepted text export drops # OCR:/CODE/**Commentary** lines")
@@ -254,8 +254,8 @@ def main():
     pending = read_json(REPO / "validation" / "pending" / "smoke.json")
     check(next(i for i in pending["pages"][0]["items"] if i["id"] == table_id)["status"] == "rejected",
           "bulk reject updates status")
-    check(not (REPO / "validation" / "verified" / f"{table_id}.json").exists()
-          and (REPO / "validation" / "rejected" / f"{table_id}.json").exists(),
+    check(not (REPO / "validation" / "verified" / "smoke" / f"{table_id}.json").exists()
+          and (REPO / "validation" / "rejected" / "smoke" / f"{table_id}.json").exists(),
           "bulk reject moves copies")
 
     # bulk pass-for-now over remaining pending items on the doc
@@ -412,7 +412,7 @@ def main():
     dl_pending = read_json(REPO / "validation" / "pending" / "smoke.json")
     dl_id = dl_pending["pages"][0]["items"][0]["id"]
     client.post(f"/item/{doc_id}/{dl_id}/action", json={"action": "accept"})
-    check((REPO / "validation" / "verified" / f"{dl_id}.json").exists(),
+    check((REPO / "validation" / "verified" / "smoke" / f"{dl_id}.json").exists(),
           "verified copy exists before delete")
     r = client.post(f"/item/{doc_id}/{dl_id}/delete", json={})
     check(r.status_code == 200, "delete item 200")
@@ -420,8 +420,8 @@ def main():
     check(not any(dl_id in [i["id"] for i in pg.get("items", [])]
                   for pg in out["doc"].get("pages", [])),
           "delete removes item from the pending doc")
-    check(not (REPO / "validation" / "verified" / f"{dl_id}.json").exists()
-          and not (REPO / "validation" / "rejected" / f"{dl_id}.json").exists(),
+    check(not (REPO / "validation" / "verified" / "smoke" / f"{dl_id}.json").exists()
+          and not (REPO / "validation" / "rejected" / "smoke" / f"{dl_id}.json").exists(),
           "delete removes verified/rejected copies")
     r = client.post(f"/item/{doc_id}/does-not-exist/delete", json={})
     check(r.status_code == 404, "delete unknown item 404")

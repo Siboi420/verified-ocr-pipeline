@@ -92,7 +92,7 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   page ranges for the initial OCR run) or /load (paths to pdf+md)
   -> GLM-OCR (Unsloth :8888) -> markdown -> itemizer.py -> review items
   -> human Accept/Edit/Reject/Skip
-  -> validation/verified/ + validation/rejected/ (JSON per item)
+  -> validation/verified/<doc_id>/ + validation/rejected/<doc_id>/ (JSON per item)
 ```
 
 - `app.py` — Flask routes: `/`, `/load` (paths), `/upload` (multipart, optional md,
@@ -153,7 +153,8 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   math/content kept; forced `table` draws keep the raw text since the wrapper may
   be the only structure). `/item/<id>/delete` removes an item from
   its page and unlinks both `verified/` and `rejected/` copies (404 if missing).
-- `rag_uploader.py` — reads `validation/verified/*.json`, groups items by
+- `rag_uploader.py` — reads `validation/verified/<doc_id>/*.json` (one folder per
+  doc), groups items by
   `doc_id`, renders one markdown file per source doc (`source_name` header, per-item
   `## page N <type> — <section>` titles, section is the full dotted heading;
   equation items with `eq_num` get a ` · eq(N)` title suffix so the KB text
@@ -165,7 +166,7 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   provision for sub-lettered equations and to the previous page where a provision
   starts; multiple same-key statements prefer the provision (“shall…”) over
   R-commentary (“is assumed…”); R-commentary equations and unverified
-  statements stay unfolded — current ACI export: 43 eq chunks, 30 folded).
+  statements stay unfolded — current ACI export: 44 eq chunks, 31 folded).
   Table chunks get the same treatment: caption stays the plain-words surface
   (the Table 22.5.5.1 retrieval miss was an uncaptioned table chunk), section
   backfilled from `table_number`, AND the rows are rendered as a SINGLE
@@ -175,7 +176,7 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   mirror is dropped so the model never reconciles two copies of the same
   table) — plus a `Symbols:` line inlining local definitions for whichever of
   `A_g`/`b_w`/`b_o`/`N_u`/`β`/`α_s` that table actually uses, so the model
-  stops hedging on symbols defined elsewhere. (11 table chunks, all
+  stops hedging on symbols defined elsewhere. (12 table chunks, all
   normalized + annotated.) Per-page ordering groups
   code + R-commentary + subsections: items sort by a numeric section tuple
   (R directly beneath its code, then subsections), fragments with no section
@@ -313,7 +314,7 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   flow is untouched). Every item has a Delete button — `confirm()` then POST
   `/item/<doc>/<item>/delete`, re-render, no cursor advance; the item and its
   verified/rejected copies are removed.
-- `validation/` — `pending/` (docs), `verified/`, `rejected/` (per-item JSON), `uploads/<doc_id>/` (pdf, md, page PNGs).
+- `validation/` — `pending/` (docs), `verified/<doc_id>/`, `rejected/<doc_id>/` (per-item JSON), `uploads/<doc_id>/` (pdf, md, page PNGs).
 - `functions/beam_calc.py` — self-contained, **stdlib-only** (math; numpy/matplotlib/argparse/yaml dropped) ACI 318M-19 beam shear/flexure calcs extracted from the BeamValidation repo
   (github.com/Siboi420/BeamValidation, commit `668be3670dc8ba065f215a0ca1b59eb9e3bd8ca5`, `scripts/RCBeam_moment_capacity.py`). Public: `min_shear_reinf(b_w, f_c, f_yt)` → Av,min per metre (mm²/m, §9.6.3.3, `max(0.062·√f'c·b_w/f_yt, 0.35·b_w/f_yt)·1000`); `shear_capacity(b, d=None, f_c=None, A_v=0, s=0, f_yw=0, A_s=None, V_u=None, M_u=None, h=None, cover_cg=None)` → wrapped `compute_aci_shear` — effective depth is **d, or h with cover_cg (d = h − cover_cg), never both (loud XOR ValueError), rejected cover_cg ≥ h**, Vc rows: simplified `§22.5.5.1(a)`; detailed `(b)` only when stirrups ≥ Av,min AND A_s+V_u+M_u given, capped `§22.5.8.5.3`-adjacent `0.29·λ·√f'c·b·d`; **size-effect `(c)` when stirrups < Av,min (or absent) and A_s given: `λ_s = min(√(2/(1+d/250)), 1)` (§22.5.5.1.3), `V_c = 0.66·λ_s·λ·ρ_w^⅓·√f'c·b·d`**; Av,min comparison via `min_shear_reinf(b, f_c, f_yw)·s/1000` (reused, not duplicated); stirrups adequate ⇔ that inequality; φ_v=0.75; returns `Vc_criterion` ("row (a)"|"row (b)"|"row (c)") + `lambda_s` on top of the numeric keys; `flex_capacity(b, d=None, A_s=None, f_c=None, f_yl=None, h=None, cover_cg=None)` → wrapped `compute_aci_flexure` (stress block §22.2.2.1, β₁ §22.2.2.4.3, φ Table 21.2.2), same d/h XOR path. Constants EPSILON_CU=0.003, Es=2e5, λ=1.0.
 - `functions/wrapper.py` — schema-driven dispatcher (`call_tool(name, **kwargs)` → `{value, unit, basis}`; registry maps the 3 tool names; loads the matching `schemas/<name>.json` resolved via `__file__`; validates required fields, unknown keys, numeric type/finiteness, exclusiveMinimum/minimum bounds; raises `ValueError` with a clear message). Schema read/parse errors (missing file, bad JSON) are wrapped as `ValueError`.
@@ -370,6 +371,12 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   forced kinds append a single item via `append_bbox_item`; equation draws use
   a dedicated LaTeX-only prompt plus a defensive HTML-table-tag strip). Items can be
   deleted (item + verified/rejected copies removed).
+- **Per-doc verified/rejected folders (migrated 2026-09-02):** item JSONs now
+  nest one folder per `doc_id` — `verified/<doc_id>/<item_id>.json`,
+  `rejected/<doc_id>/<item_id>.json` — mirroring `uploads/<doc_id>/`; the flat pile
+  of all-docs files is gone (move-only migration, counts verified identical:
+  705 ACI-318M-19-Metric items). File layout only: item ids, JSON shape, routes,
+  and KB exports are unchanged; filenames still carry the `doc_id` prefix.
 
 ## Known gotchas / foot-guns
 

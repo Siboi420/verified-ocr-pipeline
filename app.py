@@ -308,9 +308,11 @@ def apply_action(doc, item_id, action, content=None, table_spans=None, eq_num=No
                     if item.get("eq_letters") is not None:
                         payload["eq_letters"] = item["eq_letters"]
                 target = VERIFIED_DIR if action == "accept" else REJECTED_DIR
-                (target / f"{item_id}.json").write_text(json.dumps(payload, indent=2))
+                doc_dir = target / doc["doc_id"]
+                doc_dir.mkdir(parents=True, exist_ok=True)
+                (doc_dir / f"{item_id}.json").write_text(json.dumps(payload, indent=2))
                 stale = REJECTED_DIR if action == "accept" else VERIFIED_DIR
-                (stale / f"{item_id}.json").unlink(missing_ok=True)  # drop old copy on flip
+                (stale / doc["doc_id"] / f"{item_id}.json").unlink(missing_ok=True)  # drop old copy on flip
                 item["status"] = "verified" if action == "accept" else "rejected"
                 if action == "accept" and content not in (None, ""):
                     item["content"] = content  # keep edited content as source of truth
@@ -498,7 +500,7 @@ def discard_doc(doc_id):
         except OSError:
             pass  # ponytail: leftover uploads dir is harmless; retry by hand if it matters
     for d in (VERIFIED_DIR, REJECTED_DIR):
-        for f in d.glob(f"{doc_id}-*.json"):
+        for f in (d / doc_id).glob("*.json"):  # missing dir -> empty iterator
             f.unlink(missing_ok=True)
     return jsonify({"ok": True})
 
@@ -769,7 +771,7 @@ def item_delete(doc_id, item_id):
     if not removed:
         abort(404, f"item {item_id} not found")
     for d in (VERIFIED_DIR, REJECTED_DIR):
-        (d / f"{item_id}.json").unlink(missing_ok=True)
+        (d / doc_id / f"{item_id}.json").unlink(missing_ok=True)
     save_doc(doc)
     return jsonify({"ok": True, "doc": doc})
 

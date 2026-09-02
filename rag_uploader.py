@@ -101,20 +101,22 @@ def get_or_create_kb(name):
 
 def docs_from_verified(verified_dir):
     """Group verified item JSONs by doc_id, oldest-page-ordered list each.
+    Items live one folder per doc_id (verified/<doc_id>/*.json).
     Corrupt/unreadable files are skipped with a warning; so are stale
     pre-metadata exports (missing source_name) — they are bbox-OCR
     experiment artifacts, not review items."""
     by_doc = {}
-    for p in sorted(verified_dir.glob("*.json")):
-        try:
-            it = json.loads(p.read_text())
-        except (json.JSONDecodeError, OSError) as e:
-            print(f"warning: skipping unreadable {p.name}: {e}")
-            continue
-        if "source_name" not in it:
-            print(f"warning: skipping pre-metadata export {p.name}")
-            continue
-        by_doc.setdefault(it["doc_id"], []).append(it)
+    for sub in sorted(d for d in verified_dir.iterdir() if d.is_dir()):
+        for p in sorted(sub.glob("*.json")):
+            try:
+                it = json.loads(p.read_text())
+            except (json.JSONDecodeError, OSError) as e:
+                print(f"warning: skipping unreadable {p}: {e}")
+                continue
+            if "source_name" not in it:
+                print(f"warning: skipping pre-metadata export {p.name}")
+                continue
+            by_doc.setdefault(it["doc_id"], []).append(it)
     return by_doc
 
 
@@ -393,75 +395,77 @@ def _selftest():
     import tempfile
     with tempfile.TemporaryDirectory() as td:
         td = Path(td)
-        (td / "a-p1-i0.json").write_text(json.dumps(
+        (td / "a").mkdir()
+        (td / "b").mkdir()
+        (td / "a" / "a-p1-i0.json").write_text(json.dumps(
             {"doc_id": "a", "item_id": "a-p1-i0", "page": 1, "type": "equation",
              "chapter": None, "section": None, "source_name": "a.pdf",
              "eq_num": "22.5.1.2", "content": "V_u \\leq \\phi(V_c + 0.66\\sqrt{f_c'}b_w d)"}))
-        (td / "a-p1-i1.json").write_text(json.dumps(
+        (td / "a" / "a-p1-i1.json").write_text(json.dumps(
             {"doc_id": "a", "item_id": "a-p1-i1", "page": 1, "type": "text",
              "chapter": "5", "section": "5.3", "source_name": "a.pdf",
              "content": "first"}))
-        (td / "a-p1-i2.json").write_text(json.dumps(
+        (td / "a" / "a-p1-i2.json").write_text(json.dumps(
             {"doc_id": "a", "item_id": "a-p1-i2", "page": 1, "type": "text",
              "chapter": None, "section": None, "source_name": "a.pdf",
              "content": ""}))  # cleaned-to-empty: must be skipped
-        (td / "a-p1-i3.json").write_text(json.dumps(
+        (td / "a" / "a-p1-i3.json").write_text(json.dumps(
             {"doc_id": "a", "item_id": "a-p1-i3", "page": 1, "type": "text",
              "chapter": None, "section": None, "source_name": "a.pdf",
              "content": "22.5.1.1 In a member without shear reinforcement, shear is assumed to be resisted by the concrete."}))
-        (td / "a-p1-i4.json").write_text(json.dumps(
+        (td / "a" / "a-p1-i4.json").write_text(json.dumps(
             {"doc_id": "a", "item_id": "a-p1-i4", "page": 1, "type": "text",
              "chapter": None, "section": None, "source_name": "a.pdf",
              "content": "**22.5.1.1** Nominal one-way shear strength at a section, $V_n$, shall be calculated by:"}))
-        (td / "a-p1-i5.json").write_text(json.dumps(
+        (td / "a" / "a-p1-i5.json").write_text(json.dumps(
             {"doc_id": "a", "item_id": "a-p1-i5", "page": 1, "type": "equation",
              "chapter": None, "section": None, "source_name": "a.pdf",
              "eq_num": "22.5.1.1", "content": "V_n = V_c + V_s"}))
-        (td / "a-p1-i6.json").write_text(json.dumps(
+        (td / "a" / "a-p1-i6.json").write_text(json.dumps(
             {"doc_id": "a", "item_id": "a-p1-i6", "page": 1, "type": "text",
              "chapter": None, "section": None, "source_name": "a.pdf",
              "content": "**R22.5.1.2** The limit on cross-sectional dimensions is commentary."}))
-        (td / "a-p1-i7.json").write_text(json.dumps(
+        (td / "a" / "a-p1-i7.json").write_text(json.dumps(
             {"doc_id": "a", "item_id": "a-p1-i7", "page": 1, "type": "text",
              "chapter": None, "section": None, "source_name": "a.pdf",
              "content": "22.5.6.3 For prestressed members, $V_c$ shall be permitted to be the lesser of $V_{ci}$ and $V_{cw}$."}))
-        (td / "a-p1-i8.json").write_text(json.dumps(
+        (td / "a" / "a-p1-i8.json").write_text(json.dumps(
             {"doc_id": "a", "item_id": "a-p1-i8", "page": 1, "type": "equation",
              "chapter": None, "section": None, "source_name": "a.pdf",
              "eq_num": "22.5.6.3.1c", "content": "V_{ci} = 0.17\\lambda \\sqrt{f'_c}b_wd"}))
         # page 2: code section, its R-commentary, a section-less fragment that
         # must inherit the R (same-page predecessor), and a subsection
-        (td / "a-p2-i9.json").write_text(json.dumps(
+        (td / "a" / "a-p2-i9.json").write_text(json.dumps(
             {"doc_id": "a", "item_id": "a-p2-i9", "page": 2, "type": "text",
              "chapter": None, "section": "22.5.4", "source_name": "a.pdf",
              "content": "22.5.4 Composite concrete members"}))
-        (td / "a-p2-i10.json").write_text(json.dumps(
+        (td / "a" / "a-p2-i10.json").write_text(json.dumps(
             {"doc_id": "a", "item_id": "a-p2-i10", "page": 2, "type": "text",
              "chapter": None, "section": "R22.5.4", "source_name": "a.pdf",
              "content": "R22.5.4 Composite concrete members commentary"}))
-        (td / "a-p2-i11.json").write_text(json.dumps(
+        (td / "a" / "a-p2-i11.json").write_text(json.dumps(
             {"doc_id": "a", "item_id": "a-p2-i11", "page": 2, "type": "text",
              "chapter": None, "section": None, "source_name": "a.pdf",
              "content": "This fragment continues the commentary."}))
-        (td / "a-p2-i12.json").write_text(json.dumps(
+        (td / "a" / "a-p2-i12.json").write_text(json.dumps(
             {"doc_id": "a", "item_id": "a-p2-i12", "page": 2, "type": "text",
              "chapter": None, "section": "22.5.4.1", "source_name": "a.pdf",
              "content": "22.5.4.1 shall apply to separate placements."}))
-        (td / "a-p2-i13.json").write_text(json.dumps(
+        (td / "a" / "a-p2-i13.json").write_text(json.dumps(
             {"doc_id": "a", "item_id": "a-p2-i13", "page": 2, "type": "text",
              "chapter": None, "section": "R22.5.4.1", "source_name": "a.pdf",
              "content": "R22.5.4.1 The scope includes composite members."}))
-        (td / "b-p3-i4.json").write_text(json.dumps(
+        (td / "b" / "b-p3-i4.json").write_text(json.dumps(
             {"doc_id": "b", "item_id": "b-p3-i4", "page": 3, "type": "table",
              "chapter": None, "section": None, "source_name": "b.pdf",
              "table_number": "4.1.1", "caption": "Table 4.1.1—Cap",
              "content": "|x|y|"}))
-        (td / "b-p3-i5.json").write_text(json.dumps(
+        (td / "b" / "b-p3-i5.json").write_text(json.dumps(
             {"doc_id": "b", "item_id": "b-p3-i5", "page": 3, "type": "table",
              "chapter": None, "section": None, "source_name": "b.pdf",
              "table_number": "22.5.5.1", "caption": "Table 22.5.5.1—Vc",
              "content": "|$$0.66\\lambda_s\\lambda(\\rho_w)^{1/3}\\sqrt{f_{c}^{\\prime}}+\\frac{N_{u}}{6A_{g}}$$|"}))
-        (td / "junk.json").write_text("{corrupt")
+        (td / "a" / "junk.json").write_text("{corrupt")
         by_doc = docs_from_verified(td)
         assert set(by_doc) == {"a", "b"}, by_doc  # corrupt file skipped
         md_a = render_markdown(by_doc["a"])
