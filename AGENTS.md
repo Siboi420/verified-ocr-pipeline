@@ -469,7 +469,12 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   collapse to `$` and `$&`/`$\``/`$'`/`$1` mangle (verified 2026-09-03). DOM
   insertion via `createContextualFragment`
   + `replaceChildren` (no `innerHTML`), plus a link-scheme guard (non-http(s)/
-  relative href|src -> dead `#`). `.msg` keeps `overflow-wrap` instead of
+  relative href|src -> dead `#`). Math spans get one content fix: the granite
+  chat model sometimes emits `\Granite` where it means the strength-reduction
+  factor `\Phi` (its own name leaks into the math it echoes from tool output —
+  seen in session 86c6c4b58ce3, `\(\Granite V_n\)` = φV_n, `\Granite = 0.75`
+  per §21.2.1), so `\Granite` is rewritten to `\Phi` inside math spans at
+  extraction time (`/\\granite/gi`). `.msg` keeps `overflow-wrap` instead of
   `pre-wrap` (`breaks:true` supplies line breaks); minimal table CSS added;
   error/toast paths and the dev trace stay plain text. KB selector with a "no
   KB" option — per-session `kb_id`, PATCHed to the session on change.

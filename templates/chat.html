@@ -106,7 +106,7 @@ function mdToHtml(s) {
   const math = [];
   s = String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
   s = s.replace(/\\\([\s\S]*?\\\)|\\\[[\s\S]*?\\\]|\$\$[\s\S]*?\$\$|\$[^$\n]+?\$/g,
-        m => { math.push(m); return '\u0000M' + (math.length - 1) + '\u0000'; });
+        m => { math.push(m.replace(/\\granite/gi, '\\Phi')); return '\u0000M' + (math.length - 1) + '\u0000'; });
   let html = marked.parse(s, { breaks: true });
   // restore pass: replacer function — a string replacement would interpret
   // $ in the math ($$…$$ display spans collapse to $, $&/$`/$'/$1 mangle)
