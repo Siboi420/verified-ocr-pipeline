@@ -680,6 +680,7 @@ def main():
 
     # --- chat message route (answer_turn stubbed) ---
     saved_ans = appmod.orchestrator.answer_turn
+    saved_list_kbs = appmod.rag.list_kbs
 
     def fake_answer_turn(user_turn, history, kb_id, max_tokens):
         return f"echo:{user_turn}:{kb_id}", [
@@ -689,6 +690,9 @@ def main():
         ]
 
     appmod.orchestrator.answer_turn = fake_answer_turn
+    # _kb_label resolves the assistant-message tag via rag.list_kbs; stub it so
+    # the checks are offline/deterministic (id "kbab" -> "KB Ab")
+    appmod.rag.list_kbs = lambda: [{"id": "kbab", "name": "KB Ab"}]
     try:
         s = client.post("/api/chat/sessions", json={"name": "chat1"}).get_json()
         sid = s["id"]
@@ -718,6 +722,32 @@ def main():
         r = client.post(f"/api/chat/sessions/{sid}/messages", json={"content": "h3"})
         check(len(r.get_json()["session"]["messages"]) == 8,
               "eight messages persisted across four turns")
+        # (a) kb_id in the message body overrides the stored session value
+        # and persists — the send carries the dropdown, so no change/send race
+        r = client.post(f"/api/chat/sessions/{sid}/messages",
+                        json={"content": "kboverride", "kb_id": "kbother"})
+        j = r.get_json()
+        check(j["answer"] == "echo:kboverride:kbother",
+              "message-body kb_id overrides the session value for the turn")
+        check(j["session"]["kb_id"] == "kbother",
+              "message-body kb_id persisted on the session")
+        # (b) assistant messages carry the KB tag: kb_id + kb_name (raw id
+        # fallback for an unknown id, display name for a known one)
+        last = j["session"]["messages"][-1]
+        check(last["role"] == "assistant" and last["kb_id"] == "kbother"
+              and last["kb_name"] == "kbother",
+              "assistant message tagged with kb_id/kb_name (unknown id -> raw id)")
+        j = client.post(f"/api/chat/sessions/{sid}/messages",
+                        json={"content": "named", "kb_id": "kbab"}).get_json()
+        last = j["session"]["messages"][-1]
+        check(last["kb_id"] == "kbab" and last["kb_name"] == "KB Ab",
+              "assistant kb_name resolves to the display name")
+        j = client.post(f"/api/chat/sessions/{sid}/messages",
+                        json={"content": "nokb", "kb_id": None}).get_json()
+        last = j["session"]["messages"][-1]
+        check(last.get("kb_id") is None and last.get("kb_name") is None
+              and j["session"]["kb_id"] is None,
+              "null kb_id -> assistant tag null + session cleared")
         check(client.post(f"/api/chat/sessions/{sid}/messages", json={}).status_code == 400,
               "empty content -> 400")
         check(client.post("/api/chat/sessions/nope/messages",
@@ -725,6 +755,7 @@ def main():
               "message to missing session -> 404")
     finally:
         appmod.orchestrator.answer_turn = saved_ans
+        appmod.rag.list_kbs = saved_list_kbs
 
     # --- KB routes (rag_uploader._api stubbed) ---
     api_calls = []
@@ -824,8 +855,10 @@ def main():
         model_calls.append(("unload", path))
         model_jobsteps.append("unload-step:" + _running_step())
 
-    def fake_load(key):
+    def fake_load(key, variant=None):
         model_calls.append(("load", key))
+        if variant:
+            model_calls.append(("load-variant", variant))
         model_jobsteps.append("load-step:" + _running_step())
 
     def fake_list_models():
@@ -912,11 +945,33 @@ def main():
         check(model_calls == [("unload", "ggml-org/GLM-OCR-GGUF"),
                               ("load", appmod.config.CHAT_MODEL)],
               "warm swap unloads GLM-OCR path before loading chat")
+        # per-quant load: the dropdown carries a variant, the worker passes it
+        # through to models.load (subsetting the chat config pin)
+        model_state["loaded"] = None
+        model_calls.clear()
+        r = client.post("/api/model/load",
+                        json={"model": appmod.config.CHAT_MODEL, "variant": "Q4_K_M"})
+        jid = r.get_json()["job_id"]
+        job = wait_job(jid)
+        check(job["status"] == "done"
+              and ("load-variant", "Q4_K_M") in model_calls,
+              "per-quant variant threaded through to models.load")
+        # already-loaded matches the variant too: the same repo loaded with a
+        # different quant must NOT short-circuit
+        model_calls.clear()
+        model_state["loaded"] = "unsloth/granite-4.1-8b-GGUF/snapshots/s1/granite-4.1-8b-UD-Q6_K_XL.gguf"
+        r = client.post("/api/model/load",
+                        json={"model": appmod.config.CHAT_MODEL, "variant": "UD-Q6_K_XL"})
+        check(r.get_json()["status"] == "done"
+              and r.get_json()["step"] == "already loaded",
+              "already-loaded matches the loaded variant")
+        check(model_calls == [], "same-variant load is a no-op")
+        model_state["loaded"] = None
         # (c) load error -> error status propagated
         model_state["loaded"] = None
         model_calls.clear()
 
-        def boom_load(key):
+        def boom_load(key, variant=None):
             model_calls.append(("load", key))
             raise RuntimeError("boom")
 

@@ -76,6 +76,7 @@ function fillModelSel(available, loaded) {
     const o = document.createElement('option');
     o.value = m.path;
     o.textContent = m.name || m.path;
+    if (m.variant) o.dataset.variant = m.variant;  // per-quant selection
     sel.appendChild(o);
     if (loaded && (m.path === loaded || (m.path.split('/').pop() && loaded.includes(m.path.split('/').pop()))))
       match = o;
@@ -126,10 +127,13 @@ async function loadModel() {
   if (sel.disabled) return;
   const path = sel.value;
   if (!path) return;
+  const opt = sel.options[sel.selectedIndex];
+  const payload = {model: path};
+  if (opt && opt.dataset.variant) payload.variant = opt.dataset.variant;
   setModelBusy(true);
   try {
     const r = await fetch('/api/model/load', {method:'POST',
-      headers:{'Content-Type':'application/json'}, body: JSON.stringify({model:path})});
+      headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)});
     const j = await r.json();
     if (j.status === 'done') {
       toast(j.step === 'already loaded' ? 'already loaded' : j.step, 'done');

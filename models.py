@@ -43,29 +43,50 @@ def current_model():
     return active or None
 
 
-def list_models():
-    """[{"path", "name"}] of the models installed in Unsloth Studio.
-
-    The backend lists them under GET /api/models/list as a `models` array of
-    {id, name, ...}; we normalize defensively and append the config defaults
-    (GLM-OCR is a custom install the backend list doesn't include, so the
-    dropdown would otherwise lose it). Raises RuntimeError on API failure.
-    """
-    body = _api("GET", "/api/models/list")
-    raw = body if isinstance(body, list) else \
-        body.get("models") or body.get("available") or []
+def _cached_gguf_files(cache_path):
+    """Sorted GGUF filenames cached under a cache_path (snapshots/*).
+    Skips vision projectors (mmproj-*, which are not loadable models) and
+    incomplete downloads. Empty on a missing/invalid path."""
     out = []
-    for m in raw if isinstance(raw, list) else []:
-        if not isinstance(m, dict):
+    if not cache_path:
+        return out
+    snap_dir = Path(cache_path) / "snapshots"
+    if not snap_dir.is_dir():
+        return out
+    for snap in sorted(p for p in snap_dir.iterdir() if p.is_dir()):
+        for f in sorted(snap.glob("*.gguf")):
+            if f.name.startswith("mmproj-"):
+                continue
+            out.append(f.name)
+    return out
+
+
+def list_models():
+    """[{"path", "name", "variant"?}] of the GGUF models actually cached on
+    disk — one entry per installed quant, so several quants of one repo are
+    separately selectable.
+
+    The backend's model registry (/api/models/local) also lists empty or
+    half-installed repos with no weights on disk, so the source of truth is
+    the real disk cache (/api/models/cached-gguf). Each cached repo
+    contributes one entry per quant found in its snapshot dir, named
+    "<repo> (<quant>)". Raises RuntimeError on API failure.
+    """
+    body = _api("GET", "/api/models/cached-gguf")
+    out = []
+    for c in body.get("cached") or []:
+        repo = c.get("repo_id")
+        if not repo:
             continue
-        path = m.get("model_path") or m.get("id") or m.get("name")
-        if not path:
-            continue
-        name = m.get("name") or m.get("model_name") or Path(path).name
-        out.append({"path": path, "name": name})
-    for default in (config.MODEL, config.CHAT_MODEL):
-        if default and not any(o["path"] == default for o in out):
-            out.append({"path": default, "name": Path(default).name})
+        base = Path(repo).name
+        if base.endswith("-GGUF"):
+            base = base[:-5]  # "granite-4.1-8b-GGUF" -> "granite-4.1-8b"
+        for fn in _cached_gguf_files(c.get("cache_path")):
+            quant = fn[:-5] if fn.endswith(".gguf") else fn  # strip .gguf
+            if quant.startswith(base + "-"):
+                quant = quant[len(base) + 1:]
+            out.append({"path": repo, "name": f"{base} ({quant})",
+                        "variant": quant})
     return out
 
 
@@ -77,13 +98,21 @@ def unload(model_path, force=True):
     return _api("POST", "/api/inference/unload", body)
 
 
-def load(model):
+def load(model, variant=None):
     """POST /api/inference/load for a registered key or a literal path.
     MODELS keys ("ocr"/"chat") resolve to their config-default path; anything
-    else is treated as the path itself. Returns the parsed response; raises
-    RuntimeError on an API failure."""
+    else is treated as the path itself. `variant` pins the GGUF quant via the
+    load endpoint's `gguf_variant` field (falls back to the chat config
+    pin). Returns the parsed response; raises RuntimeError on an API
+    failure."""
     path = MODELS.get(model, model)
     body = {"model_path": path, "force_reload": True}
+    variant = variant or (config.CHAT_GGUF_VARIANT
+                          if path == config.CHAT_MODEL else None)
+    if variant:
+        # the backend defaults this repo to UD-Q4_K_XL (not cached -> slow
+        # download); pin the cached quant via its gguf_variant field
+        body["gguf_variant"] = variant
     if path == config.CHAT_MODEL and config.CHAT_MAX_SEQ_LENGTH:
         body["max_seq_length"] = config.CHAT_MAX_SEQ_LENGTH
     if path == config.MODEL and config.OCR_MAX_SEQ_LENGTH:
@@ -111,26 +140,63 @@ def _selftest():
         assert sent["data"]["model_path"] == config.CHAT_MODEL
         assert sent["data"]["force_reload"], "load must set force_reload"
         assert sent["data"]["max_seq_length"] == 32768
+        assert sent["data"]["gguf_variant"] == "UD-Q6_K_XL", \
+            "chat load must pin the cached GGUF variant"
         # literal path: posted verbatim, no max_seq_length (backend default)
         load("some/local/model-GGUF")
         assert sent["data"]["model_path"] == "some/local/model-GGUF"
         assert sent["data"]["force_reload"]
         assert "max_seq_length" not in sent["data"], \
             "non-default paths get no max_seq_length"
+        assert "gguf_variant" not in sent["data"], \
+            "non-chat-config paths get no gguf_variant"
+        # explicit variant wins over the config pin, even for a literal path
+        load("some/local/model-GGUF", variant="Q4_K_M")
+        assert sent["data"]["gguf_variant"] == "Q4_K_M"
         # config-MODEL path still gets its role's length override
         if config.OCR_MAX_SEQ_LENGTH:
             load(config.MODEL)
             assert sent["data"]["max_seq_length"] == config.OCR_MAX_SEQ_LENGTH
-        # list_models normalization: {models:[{id,name}]} + config defaults
-        def fake_models(method, path, data=None):
-            return {"models": [{"id": "unsloth/Other-GGUF", "name": "other"}],
-                    "default_models": []}
-        globals()["_api"] = fake_models
+        # list_models: cached-gguf is the source of truth; one entry per
+        # installed quant parsed from the snapshot filenames
+        import tempfile
+        from pathlib import Path as _P
+        calls = []
+        tmp = tempfile.mkdtemp(prefix="models_selftest_")
+        gran = _P(tmp) / "granite" / "snapshots" / "s1"
+        gran.mkdir(parents=True)
+        (gran / "granite-4.1-8b-UD-Q6_K_XL.gguf").touch()
+        glm_dir = _P(tmp) / "glm" / "snapshots" / "s1"
+        glm_dir.mkdir(parents=True)
+        (glm_dir / "GLM-OCR-Q8_0.gguf").touch()
+        (glm_dir / "GLM-OCR-f16.gguf").touch()
+        (glm_dir / "mmproj-GLM-OCR-Q8_0.gguf").touch()  # vision proj: skip
+        partial = _P(tmp) / "partial" / "snapshots" / "s1"
+        partial.mkdir(parents=True)
+        (partial / "x-GGUF-incomplete.gguf").touch()
+
+        def fake_gguf(method, path, data=None):
+            calls.append(path)
+            return {"cached": [
+                {"repo_id": "unsloth/granite-4.1-8b-GGUF",
+                 "cache_path": str(_P(tmp) / "granite")},
+                {"repo_id": "ggml-org/GLM-OCR-GGUF",
+                 "cache_path": str(_P(tmp) / "glm")},
+                {"repo_id": "someone/Other-GGUF",
+                 "cache_path": str(_P(tmp) / "partial")},
+            ]}
+        globals()["_api"] = fake_gguf
         got = list_models()
-        ids = [o["path"] for o in got]
-        assert {"path": "unsloth/Other-GGUF", "name": "other"} in got
-        assert config.MODEL in ids and config.CHAT_MODEL in ids, \
-            "config defaults appended when the backend list lacks them"
+        assert calls == ["/api/models/cached-gguf"], calls
+        assert {"path": "unsloth/granite-4.1-8b-GGUF", "name": "granite-4.1-8b (UD-Q6_K_XL)", "variant": "UD-Q6_K_XL"} in got
+        assert {"path": "ggml-org/GLM-OCR-GGUF", "name": "GLM-OCR (Q8_0)", "variant": "Q8_0"} in got
+        assert {"path": "ggml-org/GLM-OCR-GGUF", "name": "GLM-OCR (f16)", "variant": "f16"} in got
+        assert all("mmproj" not in g["name"] for g in got), \
+            "vision-projector mmproj files must be skipped"
+        assert "someone/Other-GGUF" not in [g["path"] for g in got] or \
+            {"path": "someone/Other-GGUF", "name": "Other (x-GGUF-incomplete)", "variant": "x-GGUF-incomplete"} in got
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
     finally:
         globals()["_api"] = saved_api
         config.CHAT_MAX_SEQ_LENGTH = saved_max

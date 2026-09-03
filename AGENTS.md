@@ -190,11 +190,18 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   /api/chat/sessions` (create requires non-empty `name` → 400; 201 with the
   session), `GET/PATCH/DELETE /api/chat/sessions/<sid>` (sid regex-validated;
   PATCH accepts `name` and/or `kb_id` — `null` clears; malformed sid → 404),
-  `POST /api/chat/sessions/<sid>/messages` `{content, developer?}` → appends the
-  user turn, runs `orchestrator.answer_turn(content, history, kb_id, 12000)`,
+  `POST /api/chat/sessions/<sid>/messages` `{content, developer?, kb_id?}` →
+  appends the user turn, runs `orchestrator.answer_turn(content, history, kb_id, 12000)`,
   persists both turns, returns `{answer, session, trace?}` — the trace key is
   present only when `developer` is truthy (live-only, never persisted); a failed
   turn pops the user message and returns 502, keeping the session retryable.
+  The POST mirrors the PATCH `kb_id` semantics: a `kb_id` field in the body
+  overwrites the session's stored value (the send carries the dropdown, so the
+  turn uses exactly the KB shown — no change/send race); omitted → the stored
+  value. Each persisted assistant message carries the KB tag it was answered
+  from: `kb_id` + `kb_name` (resolved at answer time via the `_kb_label` helper
+  → `rag.list_kbs()` display name, raw id fallback when the backend is
+  unreachable; `kb_id == null` → both `None`, "no KB").
   `kb_id == null` skips retrieval (bare tools only).
   KB routes: `GET /api/kb` (list via `rag.list_kbs`, 502 on backend RuntimeError),
   `POST /api/kb` (create, 400 empty name), `PATCH/DELETE /api/kb/<kb_id>`
@@ -203,21 +210,30 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   404s when it has no verified items; `__all__` uploads every verified doc and
   counts doc dirs that yielded nothing).
   Model: `GET /api/model` → `{loaded, available, job}` — `loaded` is the raw
-  resident path (string or null); `available` is `[{path, name}]` of the models
-  installed in Unsloth Studio via `models.list_models()` (a listing failure
+  resident path (string or null); `available` is `[{path, name, variant?}]` —
+  one entry PER INSTALLED QUANT of each GGUF model actually cached on disk,
+  via `models.list_models()` (`GET
+  /api/models/cached-gguf` — the real disk cache, NOT the `/api/models/local`
+  registry which also lists empty/half-installed repos with no weights; the
+  quant is parsed from each snapshot's GGUF filename, `mmproj-*` vision
+  projectors skipped) — a listing failure
   degrades to `[]`, never a 502 — the header must not die over a listing
   error); the `key` field is gone. `job` = `{id, status, step}` for an
   in-flight model swap, else null — the `MODEL_JOB_ID` module global points at
   the active job and the worker clears it on done/error, so the header
   re-attaches progress after a tab switch/reload; tabs are full page loads.
-  `POST /api/model/load` `{model:"<path>"}` (non-empty literal path; empty ->
-  400) → `{status:"done", step:"already loaded"}` when the requested GGUF
-  filename is a suffix of the resident path (no GPU churn), else a background
+  `POST /api/model/load` `{model:"<path>", variant?}` (non-empty literal
+  path; empty ->
+  400; optional `variant` = the per-quant dropdown selection → threaded into
+  `models.load(path, variant)`) → `{status:"done", step:"already loaded"}`
+  when the requested GGUF
+  filename is a suffix of the resident path or the variant appears in it (no
+  GPU churn), else a background
   job in the shared `JOBS` dict (`unloading <label>` → `loading <label>` →
   `done/loaded <label>` or `error`, labels via `_model_label`: available-list
   display name if known, else `Path(path).name`), polled via `/jobs/<id>`. The
   worker ALWAYS calls `models.unload(current_path)` (raw loaded path; no-op
-  when nothing loaded) before `models.load(path)` — unload-before-load is the
+  when nothing loaded) before `models.load(path, variant)` — unload-before-load is the
   single-model invariant. Verified live 2026-09-03 against :8888.
 - `rag_uploader.py` — reads `validation/verified/<doc_id>/*.json` (one folder per
   doc), groups items by
@@ -282,19 +298,39 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   kept for `_selftest` and config defaults (`load()` also accepts literal
   paths); `current_model()` = `GET /api/inference/status` → `active_model` or
   first of `loaded[]` (None when nothing resident); `list_models()` = `GET
-  /api/models/list` → `[{path, name}]`, defensively normalized from the
-  `models` array's `id`/`name` fields AND config defaults appended when the
-  backend list lacks them — GLM-OCR is a custom install the 82-model list
-  omits, so the dropdown would otherwise lose it (verified live 2026-09-03: 83
-  entries with the appended default); `unload(model_path, force=True)` posts to
+  /api/models/cached-gguf` → `[{path, name, variant?}]`: the real disk cache
+  is the source of truth (the `/api/models/local` registry lists empty/
+  half-installed repos with no weights) and each cached repo contributes ONE
+  entry per installed quant, parsed from the snapshot GGUF filenames
+  (`granite-4.1-8b-UD-Q6_K_XL.gguf` → `granite-4.1-8b (UD-Q6_K_XL)`;
+  `mmproj-*` vision-projector files skipped), so several quants of one model
+  are separately selectable; `unload(model_path, force=True)` posts to
   `/api/inference/unload` with `force_cancel_active:true` (kills
   non-cancellable in-flight generations; unknown/None path is a harmless no-op
-  — verified live); `load(model)` accepts a `MODELS` key ("ocr"/"chat" -> its
-  config path) or a literal path, posts `{model_path, force_reload:true,
-  max_seq_length?}` (length override ONLY when the path equals the chat/ocr
-  config default; other paths get the backend default) and polls status (~2s,
-  up to 120s) until the target reports loaded — the backend may resolve a hub
-  id to a local snapshot path, so readiness matches by GGUF filename suffix.
+  — verified live); `load(model, variant=None)` accepts a `MODELS` key
+  ("ocr"/"chat" -> its config path) or a literal path, posts `{model_path,
+  force_reload:true, gguf_variant?, max_seq_length?}` — `variant` pins the
+  quant via `gguf_variant` (falls back to `config.CHAT_GGUF_VARIANT` for the
+  chat default), and `max_seq_length` is sent ONLY when the path equals the
+  chat/ocr config default; other paths get the backend default — then polls
+  status (~2s, up to 120s) until the target reports loaded — the backend may
+  resolve a hub id to a local snapshot path, so readiness matches by GGUF
+  filename suffix.
+  **GGUF-variant foot-gun (verified live 2026-09-03):** the backend's default
+  variant for `unsloth/granite-4.1-8b-GGUF` is `UD-Q4_K_XL`, which is NOT
+  cached — loading the bare repo id triggers a multi-GB HTTP re-download
+  (xet transport stalls, then a forced clean re-download; the model stays
+  `partial: true` and slow), which is the "chat takes way too long" symptom.
+  The cached quant is `UD-Q6_K_XL` (7.9 GB, full snapshot under
+  `~/.cache/huggingface/hub/models--unsloth--granite-4.1-8b-GGUF/`). The
+  variant is passed ONLY via the `gguf_variant` field of `POST
+  /api/inference/load` — the backend REJECTS a `:UD-Q6_K_XL` suffix inside
+  `model_path` (it treats the whole string as a literal repo id → 500 "Repo
+  id must use alphanumeric chars"). With the variant pinned, the load
+  resolves straight to the cached file (no download) and the status reports
+  `display_name "granite-4.1-8b-GGUF (UD-Q6_K_XL)"`; `/api/models/local`
+  then shows granite as `partial: false`. The stale `*.incomplete` Q4 blob
+  (hundreds of MB) is harmless; the backend deletes it lazily.
   No CLI action besides `--selftest`.
 - `orchestrator.py` — RAG + tool-calling Q&A **engine + CLI only, no HTTP server**
   (stdlib + urllib, no deps). Question from `--question` or stdin (both empty →
@@ -324,7 +360,10 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   shapes, and a `run_loop` trace-shape assert with `chat()` stubbed.
 - `config.py` — `API_BASE` (default `http://localhost:8888`), `API_KEY` (env-only),
   `MODEL = "ggml-org/GLM-OCR-GGUF"` (OCR), `CHAT_MODEL =
-  "unsloth/granite-4.1-8b-GGUF"` (chat), `CHAT_MAX_SEQ_LENGTH = 32768` (explicit
+  "unsloth/granite-4.1-8b-GGUF"` (chat), `CHAT_GGUF_VARIANT =
+  "UD-Q6_K_XL"` (pins the cached quant — see the models-matching
+  foot-gun under `models.py`; the backend's default `UD-Q4_K_XL` is not
+  cached and stalls on download), `CHAT_MAX_SEQ_LENGTH = 32768` (explicit
   context-length override, same as Qwen needed; None → omit the load field),
   `OCR_MAX_SEQ_LENGTH = None` (backend default), `UPLOAD_DIR`.
 - `ocr_engine.py` — `pdf_to_images(dpi=200, page_range=None)` (accepts a single
@@ -371,9 +410,10 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   browser-style tab strip (`[OCR Validation] [Chat]`, active tab via the `tab`
   context var), the model bar (status chip polling `GET /api/model` + a single
   `#modelSel` dropdown of the installed models — `modelState()` fills it from
-  `j.available` (option value = path, text = name) and selects the loaded path
-  by GGUF-name suffix (appending it as an option when the backend list lacks
-  it) — plus a `#loadBtn` **Load** button posting the selected path to
+  `j.available` (option value = path, text = name, `data-variant` = the quant
+  when present) and selects the loaded path
+  by GGUF-name suffix — plus a `#loadBtn` **Load** button posting the selected
+  path (and its `variant`) to
   `/api/model/load`; both disabled while a swap job runs), a fixed
   toast container, and shared JS: `toast()`, `progress()`/`clearProgress()`, a
   swap shows one live toast (`unloading <name>` → `loading <name>` →
@@ -477,7 +517,11 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   extraction time (`/\\granite/gi`). `.msg` keeps `overflow-wrap` instead of
   `pre-wrap` (`breaks:true` supplies line breaks); minimal table CSS added;
   error/toast paths and the dev trace stay plain text. KB selector with a "no
-  KB" option — per-session `kb_id`, PATCHed to the session on change.
+  KB" option — the message POST carries the dropdown's `kb_id` (the server
+  persists it, so no change/send race), the `change` listener still PATCHes a
+  dropdown switch made without sending, and every assistant message renders a
+  muted `via KB: <name>` / `no KB` tag (`kbTag()` reads the persisted
+  `kb_name`/`kb_id` on each message, so labels survive a reload).
   **Developer mode** toggle: when on, the message POST carries
   `developer:true` and each reply gets a collapsible `▸ developer trace`
   `<pre>` (escaped monospace, no MathJax/markdown) with rows for retrieval
@@ -569,11 +613,16 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   restore → typeset; DOM via `createContextualFragment`/`replaceChildren`, no
   `innerHTML`; link schemes guarded). The two hardcoded Load buttons are one
   dropdown: `GET /api/model` returns `{loaded, available, job}` where
-  `available` lists the installed models (`GET /api/models/list` — verified
-  live; GLM-OCR is a custom install absent from that list, so
-  `models.list_models()` appends config defaults), and `POST /api/model/load`
-  takes a literal model path with GGUF-suffix "already loaded" matching.
-  Smoke test now 212 checks.
+  `available` is one entry PER INSTALLED QUANT of each cached GGUF model
+  (`GET /api/models/cached-gguf` — real disk cache; the `/api/models/local`
+  registry lists empty/half-installed repos with no weights and is NOT
+  consulted; `mmproj-*` skipped; verified live 2026-09-03 — sam3/gemma/qwen
+  stubs deleted, remaining: granite-4.1-8b (UD-Q6_K_XL), GLM-OCR (Q8_0),
+  GLM-OCR (f16)), and
+  `POST /api/model/load`
+  takes a literal model path (+ optional `variant` from the dropdown) with
+  variant-aware "already loaded" matching.
+  Smoke test now 219 checks.
 - **Manual item ordering (implemented 2026-09-03):** every item carries
   `order` — document position by default, editable per page via `POST
   /item/<doc_id>/<item_id>/order` `{order: <int|float>}` (floats insert
@@ -636,7 +685,7 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
 
 - `python3 test_itemizer.py` — 73 itemizer assertions.
 - `python3 functions/test_shear_tools.py` — 19 hand-calc checks for the `functions/` shear/flexure tools (Av,min mm²/m, simplified Vc, row (c) size-effect Vc incl. λ_s + ρ_w, adequate-stirrup rows (a)/(b), partial stirrups → row (c) + V_s, d↔h/cover_cg equivalence for shear and flex, d-resolution errors (XOR/neither/cover≥h), row (a) fallback, wrapper shape + unit/basis incl. h-path, validation error paths); plain asserts + PASS/FAIL, exit non-zero on failure.
-- `python3 smoke_test.py` — 212 end-to-end checks via Flask test client (no live OCR,
+- `python3 smoke_test.py` — 219 end-to-end checks via Flask test client (no live OCR,
   no backend; `rag_uploader._api`, `models.current_model/unload/load/list_models`,
   and `orchestrator.answer_turn` stubbed where they'd hit :8888):
   the original 132 assert `?ocr=1` redirect, no-key OCR error,
@@ -655,7 +704,9 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   delete, 400 on blank/no name, 404 on missing/malformed sid), chat message
   route (echo answer, no `trace` key without developer, history persisted with
   contents, `developer:true` returns the expected trace kinds, session `kb_id`
-  threaded through `answer_turn`, 400 empty content, 404 missing session),
+  threaded through `answer_turn`, message-body `kb_id` override + persist,
+  assistant messages tagged `kb_id`/`kb_name` — raw-id fallback, display-name
+  resolution, null-KB — 400 empty content, 404 missing session),
   KB routes (list/create/rename/delete issue the right Unsloth calls + shapes,
   blank names -> 400, bad kb id -> 404, single-doc + `__all__` upload with
   expected `uploaded` filenames via a temp `VERIFIED_DIR`), model API
@@ -664,7 +715,10 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   on done/idle), already-loaded short-circuits by path suffix with no calls,
   missing/empty model path -> 400, cold swap `unload` before `load` with
   unloading/loading steps captured in-stub and literal config paths passed
-  through, warm swap unloads the GLM path, load error -> `error` propagated),
+  through, warm swap unloads the GLM path, per-quant `variant`
+  threaded through `models.load` (explicit variant beats the chat config
+  pin), already-loaded matches the loaded variant (same-quant no-op,
+  different-quant proceeds), load error -> `error` propagated),
   and shared-header renders on both pages (active tab + model `#modelSel`
   dropdown + `#loadBtn`; `/chat` also carries the marked CDN script).
   the new 22 add manual ordering: `POST /item/.../order` sets/persists order and
@@ -684,10 +738,13 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
 - `python3 rag_uploader.py --selftest` — offline grouping/ordering/Unicode/empty-skip
   checks (unchanged but now with `_api` raising RuntimeError).
 - `python3 models.py --selftest` — offline: `MODELS` wiring + `load("chat")`
-  payload shape (`model_path`/`force_reload`/`max_seq_length=32768`), literal
+  payload shape (`model_path`/`force_reload`/`max_seq_length=32768`,
+  `gguf_variant` present for the chat default; explicit `variant` on a
+  literal path wins over the config pin), literal
   path `load("some/local/model-GGUF")` posts that path with no
-  `max_seq_length`, and `list_models()` normalizes `{models:[{id,name}]}` and
-  appends config defaults.
+  `max_seq_length`/`gguf_variant`, and `list_models()` hits `GET
+  /api/models/cached-gguf` and emits one entry per installed quant parsed
+  from the snapshot filenames (`mmproj-*` vision projectors skipped).
 - A quick GPU/alive check: `curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:5000/`
   (app) and `:8888` (unsloth); `nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader`
   should show >0% during OCR.

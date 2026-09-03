@@ -53,6 +53,7 @@ window.MathJax = {tex: {inlineMath: [["\\(", "\\)"], ["$", "$"]]}};
   #msgInput { flex: 1; min-height: 44px; resize: vertical; }
   #devToggle { display: flex; align-items: center; gap: 6px; }
   .empty { color: var(--muted); text-align: center; padding: 40px 0; }
+  .kbtag { display: block; margin-top: 4px; color: var(--muted); font-size: 12px; }
 </style>
 </head>
 <body>
@@ -126,6 +127,15 @@ function safeLinks(html) {
 function renderMarkdown(el, s) {
   el.replaceChildren(document.createRange().createContextualFragment(safeLinks(mdToHtml(s))));
 }
+// Muted KB tag shown under assistant messages: the name the server resolved
+// at answer time (frozen in the message), raw id as fallback, "no KB" when
+// the turn ran without retrieval.
+function kbTag(m) {
+  const span = document.createElement('span');
+  span.className = 'kbtag';
+  span.textContent = m && m.kb_id ? 'via KB: ' + (m.kb_name || m.kb_id) : 'no KB';
+  return span;
+}
 function typeset(el) {
   if (window.MathJax && MathJax.typesetPromise) MathJax.typesetPromise([el]).catch(() => {});
 }
@@ -186,6 +196,7 @@ function renderThread() {
     const d = document.createElement('div');
     d.className = 'msg ' + m.role;
     renderMarkdown(d, m.content);
+    if (m.role === 'assistant') d.appendChild(kbTag(m));
     t.appendChild(d);
     typeset(d);
   }
@@ -248,7 +259,7 @@ async function sendMessage() {
   try {
     const r = await fetch('/api/chat/sessions/' + encodeURIComponent(SESSION.id) + '/messages', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({content, developer: dev})
+      body: JSON.stringify({content, developer: dev, kb_id: $('kbSel').value || null})
     });
     const j = await r.json();
     if (!r.ok) {
@@ -259,15 +270,10 @@ async function sendMessage() {
     typeset(busyMsg);
     if (dev && j.trace) renderTrace(j.trace);
     SESSION.messages = j.session.messages;
-    // persist the session's KB selection (per-session KB)
-    const kb = $('kbSel').value;
-    if (SESSION.kb_id !== kb) {
-      const pr = await fetch('/api/chat/sessions/' + encodeURIComponent(SESSION.id), {
-        method: 'PATCH', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({kb_id: kb || null})
-      });
-      if (pr.ok) { SESSION.kb_id = kb || null; }
-    }
+    // the POST carried the dropdown's kb_id and the server persisted it, so
+    // the reply already used exactly the KB shown — no change/send race
+    SESSION.kb_id = j.session.kb_id;
+    busyMsg.appendChild(kbTag(j.session.messages[j.session.messages.length - 1]));
     $('thread').scrollTop = $('thread').scrollHeight;
   } catch (e) {
     busyMsg.textContent = 'error: ' + e;

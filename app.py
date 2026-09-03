@@ -984,6 +984,20 @@ def chat_session(sid):
     return jsonify(s)
 
 
+def _kb_label(kb_id):
+    """Display name of a KB id for the assistant-message KB tag; None when
+    no KB is set, raw id as the fallback if the backend is unreachable."""
+    if not kb_id:
+        return None
+    try:
+        for kb in rag.list_kbs():
+            if kb.get("id") == kb_id:
+                return kb.get("name") or kb_id
+    except RuntimeError:
+        pass
+    return kb_id
+
+
 @app.route("/api/chat/sessions/<sid>/messages", methods=["POST"])
 def chat_message(sid):
     s = load_session(sid)
@@ -994,6 +1008,8 @@ def chat_message(sid):
     if not content:
         abort(400, "content required")
     developer = bool(data.get("developer"))
+    if "kb_id" in data:  # send carries the dropdown selection; omitted -> stored
+        s["kb_id"] = data.get("kb_id") or None
     now = _now()
     s["messages"].append({"role": "user", "content": content, "ts": now})
     try:
@@ -1002,7 +1018,8 @@ def chat_message(sid):
     except RuntimeError as e:
         s["messages"].pop()  # failed turn: keep the session retryable, don't persist it
         return jsonify({"error": str(e)}), 502
-    s["messages"].append({"role": "assistant", "content": answer, "ts": _now()})
+    s["messages"].append({"role": "assistant", "content": answer, "ts": _now(),
+                           "kb_id": s.get("kb_id"), "kb_name": _kb_label(s.get("kb_id"))})
     s["updated_at"] = _now()
     save_session(s)
     resp = {"answer": answer, "session": s}
@@ -1151,9 +1168,18 @@ def model_load():
     path = str(data.get("model") or "").strip()
     if not path:
         abort(400, "model path required")
+    variant = data.get("variant") or None  # per-quant selection from the dropdown
     try:
         current_path = _target_loaded()
-        if current_path and Path(path).name in current_path:
+        # already-loaded: GGUF filename suffix match (the backend reports a
+        # resolved snapshot path), or the pinned chat variant token — the
+        # bare repo name "granite-4.1-8b-GGUF" never appears inside the
+        # resolved "granite-4.1-8b-UD-Q6_K_XL.gguf" path
+        if current_path and (
+                Path(path).name in current_path
+                or (path == config.CHAT_MODEL and config.CHAT_GGUF_VARIANT
+                    and config.CHAT_GGUF_VARIANT in current_path)
+                or (variant and variant in current_path)):
             return jsonify({"status": "done", "step": "already loaded"})
     except RuntimeError as e:
         return jsonify({"error": str(e)}), 502
@@ -1161,11 +1187,12 @@ def model_load():
     what = _model_label(current_path) if current_path else "resident"
     JOBS[job_id] = {"status": "running", "step": f"unloading {what}"}
     MODEL_JOB_ID = job_id  # a new load supersedes any stale pointer
-    threading.Thread(target=_model_job, args=(job_id, path, current_path), daemon=True).start()
+    threading.Thread(target=_model_job,
+                     args=(job_id, path, current_path, variant), daemon=True).start()
     return jsonify({"job_id": job_id})
 
 
-def _model_job(job_id, path, current_path):
+def _model_job(job_id, path, current_path, variant=None):
     """Worker: unload whatever is resident, then load the target model.
     Unload ALWAYS precedes load (the backend is single-model; load would
     refuse or evict mid-flight otherwise). force_cancel_active kills
@@ -1176,7 +1203,7 @@ def _model_job(job_id, path, current_path):
         JOBS[job_id]["step"] = f"unloading {_model_label(current_path) if current_path else 'resident'}"
         models.unload(current_path or None)  # no-op when nothing loaded
         JOBS[job_id]["step"] = f"loading {_model_label(path)}"
-        models.load(path)
+        models.load(path, variant=variant)
         JOBS[job_id].update(status="done", step=f"loaded {_model_label(path)}")
     except Exception as e:
         JOBS[job_id] = {"status": "error", "error": str(e)}
