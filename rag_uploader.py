@@ -11,6 +11,7 @@ Usage:
 """
 import argparse
 import json
+import math
 import os
 import re
 import urllib.error
@@ -147,9 +148,14 @@ def docs_for_doc(doc_id):
 
 
 def _item_order(it):
-    """Document order within a page: the trailing numeric index of item_id
-    ("…-p404-i2" -> 2). Fallback 0 keeps bbox-added items (no index) first;
-    stable sort preserves their append order."""
+    """Ordering key within a page: the item's manual/document `order` number
+    when present (int|float — floats allow inserting between numbered items),
+    else the trailing numeric index of item_id ("…-p404-i2" -> 2).
+    Legacy bbox items (no order, no id index) fall back to 0; stable sort
+    preserves their append order."""
+    order = it.get("order")
+    if isinstance(order, (int, float)) and math.isfinite(order):
+        return order
     try:
         return int(it.get("item_id", "").rsplit("i", 1)[-1])
     except ValueError:
@@ -539,6 +545,12 @@ def _selftest():
     mb = _math_to_text("0.33\\lambda_{s}\\lambda\\sqrt{f_{c}^{\\prime}}")
     assert "λ_sλ√(f_c′" in mb, mb
     assert "lambdas" not in mb and "sqrt" not in mb, mb
+    # _item_order: a manual `order` wins over the item_id numeric index (a
+    # reordered item sorts by its number, floats included)
+    assert _item_order({"item_id": "a-p1-i1", "order": 2.5}) == 2.5
+    assert _item_order({"item_id": "a-p1-i1", "order": 0}) == 0  # explicit 0 honored
+    assert _item_order({"item_id": "a-p1-i3"}) == 3  # legacy fallback: id index
+    assert _item_order({"item_id": "a-p1-bboxx"}) == 0  # bbox: no index -> 0
     print("selftest: ok")
 
 

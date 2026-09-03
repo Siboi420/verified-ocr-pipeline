@@ -138,6 +138,82 @@ def main():
     check(r.status_code == 200 and r.mimetype == "image/png" and len(r.data) > 1000,
           "page PNG served")
 
+    # --- manual order: POST order sets it, page reorders, validation 400s ---
+    eq_id0 = p1[0]["id"]  # equation (doc position 3 on page 1)
+    r = client.post(f"/item/{doc_id}/{eq_id0}/order", json={"order": 1.5})
+    check(r.status_code == 200, "order route 200")
+    out1 = r.get_json()["doc"]["pages"][0]["items"]
+    check(next(i for i in out1 if i["id"] == eq_id0)["order"] == 1.5,
+          "order persisted on the item")
+    by_order = sorted(out1, key=lambda i: (i.get("order") is None, i.get("order", 0)))
+    check(by_order[0]["id"] != eq_id0 and by_order[1]["id"] == eq_id0,
+          "sorting by order places the reordered equation between orders 1 and 2")
+    check(client.post(f"/item/{doc_id}/{eq_id0}/order", json={}).status_code == 400,
+          "order missing -> 400")
+    check(client.post(f"/item/{doc_id}/{eq_id0}/order", json={"order": "abc"}).status_code == 400,
+          "order non-numeric -> 400")
+    check(client.post(f"/item/{doc_id}/{eq_id0}/order", json={"order": "nan"}).status_code == 400,
+          "order NaN -> 400")
+    check(client.post(f"/item/{doc_id}/{eq_id0}/order", json={"order": 1e999}).status_code == 400,
+          "order inf -> 400")
+    check(client.post(f"/item/{doc_id}/nope/order", json={"order": 1}).status_code == 404,
+          "order unknown item -> 404")
+
+    # order flows into the verified/rejected JSON payloads; a fresh parse
+    # re-stamps document order independent of the manual edit (the route
+    # touches the doc JSON only)
+    r = client.post(f"/item/{doc_id}/{eq_id0}/action", json={"action": "accept"})
+    ev = read_json(REPO / "validation" / "verified" / "smoke" / f"{eq_id0}.json")
+    check(r.status_code == 200 and ev.get("order") == 1.5,
+          "accepted JSON carries the item's order")
+    r = client.post(f"/item/{doc_id}/{eq_id0}/action", json={"action": "reject"})
+    rv = read_json(REPO / "validation" / "rejected" / "smoke" / f"{eq_id0}.json")
+    check(r.status_code == 200 and rv.get("order") == 1.5,
+          "rejected JSON carries the order too (flip back for the editor flow)")
+    fresh = appmod.parse_document(md_path.read_text(), doc_id)
+    check(next(i for i in fresh[0]["items"] if i["id"] == eq_id0)["order"] == 3,
+          "fresh parse re-stamps document order (manual edit is doc-JSON only)")
+
+    # _ensure_order: a legacy doc (no order fields, no stamp marker) gets
+    # document order without losing review state; bbox-only items tail the
+    # page; deleted items are not resurrected
+    edoc = "ensurex"
+    efresh = appmod.parse_document(md_path.read_text(), edoc)  # ids ensurex-p1-i*: orders 3,4,5,1,2
+    legacy = {
+        "doc_id": edoc,
+        "md_path": str(md_path),
+        "pdf_path": str(pdf_path),
+        "pages": [{"page": 1, "items": [
+            {k: v for k, v in it.items() if k != "order"}
+            for it in efresh[0]["items"]
+            if not it["id"].endswith("-i3")  # i3 deleted
+        ]}],
+    }
+    keep5 = next(it for it in legacy["pages"][0]["items"] if it["id"].endswith("-i5"))
+    keep5["status"] = "verified"
+    keep5["content"] = "EDITED PROSE"
+    legacy["pages"][0]["items"].append({
+        "id": f"{edoc}-p1-bboxabcd", "type": "text",
+        "content": "drawn crop", "status": "pending"})
+    appmod._ensure_order(legacy)
+    lout = read_json(REPO / "validation" / "pending" / f"{edoc}.json")
+    lorders = {it["id"]: it.get("order") for it in lout["pages"][0]["items"]}
+    check(lout.get("_order_stamped"), "_ensure_order persists the stamp marker")
+    check(all(o is not None for o in lorders.values()),
+          "_ensure_order stamps order onto every existing item")
+    check(lorders[f"{edoc}-p1-i1"] == 3 and lorders[f"{edoc}-p1-i5"] == 2,
+          "_ensure_order reuses the fresh parse's document orders")
+    check(not any(i_.endswith("-i3") for i_ in lorders),
+          "_ensure_order does not resurrect deleted items")
+    check(lorders[f"{edoc}-p1-bboxabcd"] == max(lorders.values()),
+          "bbox-only item tails the page order")
+    k5 = next(it for it in lout["pages"][0]["items"] if it["id"].endswith("-i5"))
+    check(k5["status"] == "verified" and k5["content"] == "EDITED PROSE",
+          "_ensure_order preserves review state (status / edited content)")
+    client.post(f"/doc/{edoc}/discard")
+    check(not (REPO / "validation" / "pending" / f"{edoc}.json").exists(),
+          "ensurex doc discarded")
+
     # accept edited table -> verified/
     table_id = p1[1]["id"]
     r = client.post(f"/item/{doc_id}/{table_id}/action",
@@ -277,12 +353,16 @@ def main():
     eitem = appmod.append_bbox_item(probe2, 1, "(a) $$E = m c^2$$ (22.5.1.10a)", "equation")
     check(eitem["eq_num"] == "22.5.1.10a" and eitem["eq_letters"] == "a",
           "append_bbox_item equation captures eq_num/eq_letters")
+    check(eitem.get("order") == 1,
+          "append_bbox_item assigns tail order (page had 1 item, no orders)")
     check(eitem["chapter"] == "5" and eitem["section"] == "5.3",
           "append_bbox_item inherits chapter/section from the latest item")
     titem = appmod.append_bbox_item(probe2, 1, "The factor \\(\\phi = 0.9\\) governs.", "text")
     tplain = appmod.append_bbox_item(probe2, 1, "Plain prose.", "text")
     check(titem["has_inline_math"] and not tplain["has_inline_math"],
           "append_bbox_item text flags inline math")
+    check(titem.get("order") == 2 and tplain.get("order") == 3,
+          "append_bbox_item orders increment at the page tail")
     check(appmod.append_bbox_item(probe2, 1, "|A|\n|---|\n|1|", "table")["type"] == "table",
           "append_bbox_item forced table kind")
 
@@ -514,14 +594,23 @@ def main():
     mer = read_json(REPO / "validation" / "pending" / "merge.json")
     check(next(i for i in mer["pages"][0]["items"] if i["id"] == keep_id)["status"] == "verified",
           "item verified before merge")
+    # a manually-edited order survives the incremental merge (restore copies
+    # whole item dicts by id)
+    keep_item = next(i for i in mer["pages"][0]["items"] if i["id"] == keep_id)
+    keep_item["order"] = 99.5
+    (REPO / "validation" / "pending" / "merge.json").write_text(json.dumps(mer))
+    mer = read_json(REPO / "validation" / "pending" / "merge.json")
+    check(next(i for i in mer["pages"][0]["items"] if i["id"] == keep_id)["order"] == 99.5,
+          "manual order persisted before merge")
     appmod.merge_pages_into_doc(
         mer, [3],
         [{"page": 3, "path": "p3.png", "text": "PAGE THREE", "truncated": False}])
     mer = read_json(REPO / "validation" / "pending" / "merge.json")
     p1 = mer["pages"][0]
     kept = next(i for i in p1["items"] if i["id"] == keep_id)
-    check(kept["status"] == "verified" and kept["content"] == p1["items"][0]["content"],
-          "page-1 review state preserved across incremental merge")
+    check(kept["status"] == "verified" and kept["content"] == p1["items"][0]["content"]
+          and kept.get("order") == 99.5,
+          "page-1 review state (incl. manual order) preserved across incremental merge")
     p3 = next(p for p in mer["pages"] if p["page"] == 3)
     check(p3["items"] and all(i["status"] == "pending" for i in p3["items"]),
           "new page 3 items arrive pending")
@@ -640,6 +729,14 @@ def main():
     # --- KB routes (rag_uploader._api stubbed) ---
     api_calls = []
 
+    def stub_name(data):
+        # test stub: route always sends {name}; a malformed body still must
+        # not crash the fake
+        try:
+            return json.loads(data or b"{}")["name"]
+        except (json.JSONDecodeError, KeyError, TypeError):
+            return ""
+
     def fake_api(method, path, data=None, headers=None):
         api_calls.append((method, path))
         if method == "GET" and path == "/api/rag/knowledge-bases":
@@ -647,9 +744,9 @@ def main():
                 {"id": "k1", "name": "Verified OCR", "description": "d", "documentCount": 3},
                 {"id": "k2", "name": "OpenSees", "description": "e", "documentCount": 9}]}
         if method == "POST" and path == "/api/rag/knowledge-bases":
-            return {"id": "knew", "name": json.loads(data or b"{}")["name"], "documentCount": 0}  # type: ignore[arg-type]
+            return {"id": "knew", "name": stub_name(data), "documentCount": 0}
         if method == "PATCH":
-            return {"id": path.rsplit("/", 1)[-1], "name": json.loads(data or b"{}")["name"]}  # type: ignore[arg-type]
+            return {"id": path.rsplit("/", 1)[-1], "name": stub_name(data)}
         if method == "DELETE":
             return {"ok": True}
         if path.endswith("/documents"):  # multipart POST data is bytes
@@ -730,10 +827,19 @@ def main():
     def fake_load(key):
         model_calls.append(("load", key))
         model_jobsteps.append("load-step:" + _running_step())
-    saved_m = (appmod.models.current_model, appmod.models.unload, appmod.models.load)
+
+    def fake_list_models():
+        return [
+            {"path": appmod.config.MODEL, "name": "GLM-OCR"},
+            {"path": appmod.config.CHAT_MODEL, "name": "granite"},
+        ]
+
+    saved_m = (appmod.models.current_model, appmod.models.unload, appmod.models.load,
+               appmod.models.list_models)
     appmod.models.current_model = fake_current
     appmod.models.unload = fake_unload
     appmod.models.load = fake_load
+    appmod.models.list_models = fake_list_models
 
     def wait_job(jid):
         job = {}
@@ -746,8 +852,12 @@ def main():
 
     try:
         r = client.get("/api/model")
-        check(r.status_code == 200 and r.get_json()["loaded"] is None
-              and r.get_json()["key"] is None, "GET /api/model with nothing loaded")
+        j = r.get_json()
+        check(r.status_code == 200 and j["loaded"] is None
+              and "key" not in j and j["available"] == [
+                  {"path": appmod.config.MODEL, "name": "GLM-OCR"},
+                  {"path": appmod.config.CHAT_MODEL, "name": "granite"}],
+              "GET /api/model with nothing loaded -> available list, no key")
         # in-flight model job is exposed (header re-attaches progress on tab
         # switch / reload — tabs are full page loads, the JS toast alone dies)
         appmod.MODEL_JOB_ID = "fakej"
@@ -765,25 +875,28 @@ def main():
               "/api/model job null when idle")
         model_state["loaded"] = "ggml-org/GLM-OCR-GGUF"
         r = client.get("/api/model")
-        check(r.get_json()["key"] == "ocr", "/api/model key resolves ocr by suffix")
+        check(r.get_json()["loaded"] == "ggml-org/GLM-OCR-GGUF"
+              and r.get_json()["available"],
+              "/api/model reports the raw loaded path + available list")
         # (a) already loaded -> short-circuit, no job, no unload/load calls
         model_calls.clear()
-        r = client.post("/api/model/load", json={"model": "ocr"})
+        r = client.post("/api/model/load", json={"model": appmod.config.MODEL})
         check(r.status_code == 200 and r.get_json()["status"] == "done"
               and r.get_json()["step"] == "already loaded", "already-loaded short-circuits")
         check(model_calls == [], "already-loaded issues no unload/load calls")
-        check(client.post("/api/model/load", json={"model": "wat"}).status_code == 400,
-              "unknown model key -> 400")
+        check(client.post("/api/model/load", json={"model": ""}).status_code == 400
+              and client.post("/api/model/load", json={}).status_code == 400,
+              "missing/empty model path -> 400")
         # (b) cold: unload ALWAYS precedes load, steps unloading->loading->done
         model_state["loaded"] = None
         model_calls.clear()
         model_jobsteps.clear()
-        r = client.post("/api/model/load", json={"model": "chat"})
+        r = client.post("/api/model/load", json={"model": appmod.config.CHAT_MODEL})
         jid = r.get_json()["job_id"]
         job = wait_job(jid)
         check(job["status"] == "done" and "loaded granite" in job["step"],
               "cold job ends done/loaded granite")
-        check(model_calls == [("unload", None), ("load", "chat")],
+        check(model_calls == [("unload", None), ("load", appmod.config.CHAT_MODEL)],
               f"cold swap calls unload() before load() ({model_calls})")
         check(any(s.startswith("unload-step:unloading") for s in model_jobsteps),
               "unload() saw job in unloading step")
@@ -792,11 +905,12 @@ def main():
         # warm (GLM loaded -> chat): unload gets the GLM path first
         model_state["loaded"] = "ggml-org/GLM-OCR-GGUF"
         model_calls.clear()
-        r = client.post("/api/model/load", json={"model": "chat"})
+        r = client.post("/api/model/load", json={"model": appmod.config.CHAT_MODEL})
         jid = r.get_json()["job_id"]
         job = wait_job(jid)
         check(job["status"] == "done", "warm swap ends done")
-        check(model_calls == [("unload", "ggml-org/GLM-OCR-GGUF"), ("load", "chat")],
+        check(model_calls == [("unload", "ggml-org/GLM-OCR-GGUF"),
+                              ("load", appmod.config.CHAT_MODEL)],
               "warm swap unloads GLM-OCR path before loading chat")
         # (c) load error -> error status propagated
         model_state["loaded"] = None
@@ -807,25 +921,30 @@ def main():
             raise RuntimeError("boom")
 
         appmod.models.load = boom_load
-        r = client.post("/api/model/load", json={"model": "ocr"})
+        r = client.post("/api/model/load", json={"model": appmod.config.MODEL})
         jid = r.get_json()["job_id"]
         job = wait_job(jid)
         check(job["status"] == "error" and "boom" in job["error"],
               "load error -> job error status propagated")
-        check(model_calls == [("unload", None), ("load", "ocr")],
+        check(model_calls == [("unload", None), ("load", appmod.config.MODEL)],
               "error path still unloads before loading")
     finally:
-        appmod.models.current_model, appmod.models.unload, appmod.models.load = saved_m
+        (appmod.models.current_model, appmod.models.unload, appmod.models.load,
+         appmod.models.list_models) = saved_m
 
     # --- shared header: tabs + model control on both pages ---
     r = client.get("/")
     h = r.get_data(as_text=True)
     check('<a href="/" class="active">OCR Validation</a>' in h
-          and 'id="loadOcrBtn"' in h, "/ renders active OCR tab + model control")
+          and 'id="modelSel"' in h and 'id="loadBtn"' in h,
+          "/ renders active OCR tab + model dropdown")
     r = client.get("/chat")
     h = r.get_data(as_text=True)
     check('<a href="/chat" class="active">Chat</a>' in h
-          and 'id="loadChatBtn"' in h, "/chat renders active Chat tab + model control")
+          and 'id="modelSel"' in h and 'id="loadBtn"' in h,
+          "/chat renders active Chat tab + model dropdown")
+    check('https://cdn.jsdelivr.net/npm/marked@15/marked.min.js' in h,
+          "/chat includes the marked CDN for markdown rendering")
 
     # discard document: pending record + verified/rejected item copies removed
     r = client.post(f"/doc/{doc_id}/discard")

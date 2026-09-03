@@ -360,14 +360,22 @@ def parse_document(markdown, doc_id=""):
     Returns [{"page": n, "items": [item, ...]}, ...] with each item:
       {"id": "<doc_id>-p<n>-i<k>", "type": "equation|table|text",
        "content": str, "has_inline_math": bool, "status": "pending",
+       "order": int (1-based document position, set BEFORE the priority sort),
        "chapter": str|None, "section": str|None}
-    k is 1-based within the page. Items are ordered equation -> table -> text,
-    which equals priority order; the UI re-sorts by (page, priority) anyway.
+    k is 1-based within the page. `order` is the item's document position
+    (the kind/line-ordered sequence `_parse_page_body` produces) and is the
+    display/export sort key; the type-priority sort below survives ONLY as
+    the deterministic id-assignment mechanism (equation -> table ->
+    text-math -> text), so ids are stable across merges/status restores even
+    though items display in document order.
     """
     pages_out = []
     for page_num, body in _split_pages(markdown):
-        items = _parse_page_body(body)
+        items = _parse_page_body(body)  # already in document order
+        for k, it in enumerate(items, start=1):
+            it["order"] = k
         # (page, priority) ordering: stable, so document order holds within a priority.
+        # id-assignment only; display/export sort by `order` instead.
         items.sort(key=lambda it: item_priority(it["type"], it["has_inline_math"]))
         for k, it in enumerate(items, start=1):
             it["id"] = f"{doc_id}-p{page_num}-i{k}"

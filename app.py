@@ -205,9 +205,12 @@ def append_bbox_items(doc, page, markdown):
     if not new_items:
         return 0
     target = _target_page(doc, page)
+    tail = max((it.get("order", 0) for it in target["items"]), default=0) + 1
     for it in new_items:
         it["id"] = f"{doc['doc_id']}-p{page}-bbox{uuid.uuid4().hex[:8]}"
         it["status"] = "pending"
+        it["order"] = tail  # drawn crops land at the page tail, deterministically
+        tail += 1
         target["items"].append(it)
     return len(new_items)
 
@@ -241,6 +244,7 @@ def append_bbox_item(doc, page, text, kind):
         "status": "pending",
         "type": kind,
         "content": content,
+        "order": max((it.get("order", 0) for it in target["items"]), default=0) + 1,
         "chapter": None,
         "section": None,
     }
@@ -301,6 +305,7 @@ def apply_action(doc, item_id, action, content=None, table_spans=None, eq_num=No
                     "item_id": item_id,
                     "page": page["page"],
                     "type": item["type"],
+                    "order": item.get("order"),
                     "chapter": item.get("chapter"),
                     "section": item.get("section"),
                     "source_name": doc.get("source_name", ""),
@@ -390,14 +395,14 @@ def sessions_list():
 
 @app.route("/")
 def index():
-    return render_template("index.html", docs=docs_list(), doc=None, tab="ocr", page_model="ocr")
+    return render_template("index.html", docs=docs_list(), doc=None, tab="ocr")
 
 
 @app.route("/chat")
 def chat_page():
     sid = request.args.get("s", "")
     session = load_session(sid) if sid else None
-    return render_template("chat.html", session=session, tab="chat", page_model="chat")
+    return render_template("chat.html", session=session, tab="chat")
 
 
 @app.route("/load", methods=["POST"])
@@ -753,12 +758,91 @@ def job_status(job_id):
     return jsonify(job)
 
 
+def _page_orders(markdown, doc_id):
+    """{item_id: order} from a fresh parse (document order pre-sort).
+
+    The ids come from the priority sort, the orders from the document
+    sequence; ids present on both keys align by construction (order is
+    stamped before ids are assigned, so item k keeps both)."""
+    return {
+        it["id"]: it.get("order")
+        for pg in parse_document(markdown, doc_id) for it in pg["items"]
+    }
+
+
+def _ensure_order(doc):
+    """Stamp document order onto existing items; called once per doc load.
+
+    Re-parses the md (fresh ids/orders align deterministically: `order` is
+    stamped before ids are assigned), then writes `order` onto items that
+    exist on both sides. bbox/drawn items — which have no md source and so
+    are absent from the fresh parse — keep the page tail order (page max+1,
+    in append order); deleted items are not resurrected (they appear on
+    neither side). Persists the `_order_stamped` marker after the first run,
+    so later loads skip the re-parse. Never touches review state.
+    """
+    if doc.get("_order_stamped"):
+        return
+    md_path = Path(doc["md_path"])
+    if not md_path.exists():
+        doc["_order_stamped"] = True
+        save_doc(doc)
+        return
+    fresh = _page_orders(md_path.read_text(), doc["doc_id"])
+    for pg in doc.get("pages", []):
+        items = pg.get("items", [])
+        # pass 1: stamp document positions (md-sourced items only)
+        for it in items:
+            o = fresh.get(it["id"])
+            if o is not None:
+                it["order"] = o
+        # pass 2: drawn crops (no md source) tail the page after the highest
+        # stamped order, in append order (already-ordered stragglers keep it)
+        tail = max((it.get("order", 0) for it in items), default=0) + 1
+        for it in items:
+            if it["id"] not in fresh and "order" not in it:
+                it["order"] = tail
+                tail += 1
+    doc["_order_stamped"] = True
+    save_doc(doc)
+
+
+@app.route("/item/<doc_id>/<item_id>/order", methods=["POST"])
+def item_order(doc_id, item_id):
+    """Set an item's manual display order (int|float; floats insert between)."""
+    if (
+        not re.fullmatch(r"[A-Za-z0-9._-]+", doc_id)
+        or not re.fullmatch(r"[A-Za-z0-9._-]+", item_id)
+    ):
+        abort(404)
+    doc = load_doc(doc_id)
+    if doc is None:
+        abort(404)
+    data = request.get_json(silent=True) or {}
+    try:
+        order = float(data["order"])
+    except (KeyError, TypeError, ValueError):
+        abort(400, "order must be a finite number")
+    if not math.isfinite(order):
+        abort(400, "order must be a finite number")
+    item = next(
+        (it for pg in doc.get("pages", []) for it in pg["items"] if it["id"] == item_id),
+        None,
+    )
+    if item is None:
+        abort(404, f"item {item_id} not found")
+    item["order"] = order
+    save_doc(doc)
+    return jsonify({"ok": True, "doc": doc})
+
+
 @app.route("/doc/<doc_id>")
 def doc_view(doc_id):
     doc = load_doc(doc_id)
     if doc is None:
         abort(404)
-    return render_template("index.html", docs=docs_list(), doc=doc, tab="ocr", page_model="ocr")
+    _ensure_order(doc)  # legacy docs get document order without losing review state
+    return render_template("index.html", docs=docs_list(), doc=doc, tab="ocr")
 
 
 @app.route("/page/<doc_id>/<int:n>.png")
@@ -1011,8 +1095,6 @@ def kb_upload(kb_id):
 
 # --- model management (one resident model at a time) ---
 
-
-MODEL_NAMES = {"ocr": "GLM-OCR", "chat": "granite"}  # human labels for steps/toasts
 # The active model-swap job id, so GET /api/model can report an in-flight job
 # and any page load re-attaches progress (tabs are full page loads — the JS
 # toast alone dies on navigation). Single-user, at most one model job at a time.
@@ -1020,16 +1102,27 @@ MODEL_JOB_ID = None
 
 
 def _target_loaded():
-    """The loaded model key ("ocr"/"chat"/None) via models.current_model()
-    (suffix match — the backend may report a resolved local snapshot path).
+    """The loaded model path (or None) via models.current_model().
     Raises RuntimeError on API failure."""
-    loaded = models.current_model() or ""
-    if not loaded:
-        return None
-    for key, path in models.MODELS.items():
-        if Path(path).name in loaded:
-            return key
-    return None
+    return models.current_model() or None
+
+
+def _model_label(path):
+    """Human label for a model path: the available-list display name if
+    known, else the GGUF filename (the backend may report a resolved local
+    snapshot path, so names also match by suffix)."""
+    if not path:
+        return "resident"
+    base = Path(path).name
+    try:
+        avail = models.list_models()
+    except RuntimeError:
+        avail = []
+    for m in avail:
+        mp = m.get("path") or ""
+        if mp == path or (base and (base in mp or Path(mp).name in path)):
+            return m.get("name") or base
+    return base
 
 
 @app.route("/api/model")
@@ -1038,12 +1131,11 @@ def model_status():
         loaded = models.current_model()
     except RuntimeError as e:
         return jsonify({"error": str(e)}), 502
-    key = None
-    if loaded:
-        for k, path in models.MODELS.items():
-            if Path(path).name in loaded:
-                key = k
-    resp = {"loaded": loaded, "key": key, "job": None}
+    try:
+        available = models.list_models()
+    except RuntimeError:
+        available = []  # a listing failure must not 502 the header
+    resp = {"loaded": loaded, "available": available, "job": None}
     if MODEL_JOB_ID and MODEL_JOB_ID in JOBS:
         j = JOBS[MODEL_JOB_ID]
         if j.get("status") == "running":
@@ -1056,24 +1148,24 @@ def model_status():
 def model_load():
     global MODEL_JOB_ID
     data = request.get_json(silent=True) or {}
-    key = str(data.get("model") or "")
-    if key not in models.MODELS:
-        abort(400, "model must be ocr|chat")
+    path = str(data.get("model") or "").strip()
+    if not path:
+        abort(400, "model path required")
     try:
-        current_key = _target_loaded()
-        if current_key == key:
+        current_path = _target_loaded()
+        if current_path and Path(path).name in current_path:
             return jsonify({"status": "done", "step": "already loaded"})
     except RuntimeError as e:
         return jsonify({"error": str(e)}), 502
     job_id = uuid.uuid4().hex[:12]
-    what = MODEL_NAMES[current_key] if current_key else "resident"
+    what = _model_label(current_path) if current_path else "resident"
     JOBS[job_id] = {"status": "running", "step": f"unloading {what}"}
     MODEL_JOB_ID = job_id  # a new load supersedes any stale pointer
-    threading.Thread(target=_model_job, args=(job_id, key, current_key), daemon=True).start()
+    threading.Thread(target=_model_job, args=(job_id, path, current_path), daemon=True).start()
     return jsonify({"job_id": job_id})
 
 
-def _model_job(job_id, key, current_key):
+def _model_job(job_id, path, current_path):
     """Worker: unload whatever is resident, then load the target model.
     Unload ALWAYS precedes load (the backend is single-model; load would
     refuse or evict mid-flight otherwise). force_cancel_active kills
@@ -1081,11 +1173,11 @@ def _model_job(job_id, key, current_key):
     calls)."""
     global MODEL_JOB_ID
     try:
-        JOBS[job_id]["step"] = f"unloading {MODEL_NAMES[current_key] if current_key else 'resident'}"
-        models.unload(models.MODELS[current_key] if current_key else None)  # no-op when nothing loaded
-        JOBS[job_id]["step"] = f"loading {MODEL_NAMES[key]}"
-        models.load(key)
-        JOBS[job_id].update(status="done", step=f"loaded {MODEL_NAMES[key]}")
+        JOBS[job_id]["step"] = f"unloading {_model_label(current_path) if current_path else 'resident'}"
+        models.unload(current_path or None)  # no-op when nothing loaded
+        JOBS[job_id]["step"] = f"loading {_model_label(path)}"
+        models.load(path)
+        JOBS[job_id].update(status="done", step=f"loaded {_model_label(path)}")
     except Exception as e:
         JOBS[job_id] = {"status": "error", "error": str(e)}
     finally:

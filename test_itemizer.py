@@ -56,6 +56,25 @@ def main():
              for pg in pages for it in pg["items"]]
     check(order == sorted(order), "(page, priority) ordering holds")
 
+    # `order` is the 1-based document position, stamped BEFORE the priority
+    # sort: sorting by order reproduces the document sequence (title,
+    # inline-math paragraph, plain text, lead-in, equation) — NOT the
+    # priority sequence the ids follow (equation, math text, plain texts).
+    by_order = sorted(p1, key=lambda it: it["order"])
+    check([it["content"] for it in by_order] == [
+        "# Sample doc",
+        "Intro paragraph with inline math \\(M_u\\) here.",
+        "Some plain text, nothing special.",
+        "The capacity is given by:",
+        "M_n = A_s f_y (d - a/2)",
+    ], "order matches document sequence (title, math text, plain, lead-in, equation)")
+    check([it["order"] for it in p1] == [5, 2, 1, 3, 4],
+          "order is the document position, not the priority sequence")
+    check([it["order"] for it in by_order] == [1, 2, 3, 4, 5],
+          "orders are unique 1-based positions")
+    check([it["order"] for it in p2] == [1, 2],
+          "page 2: table then trailing text keep document order")
+
     # No separators -> whole doc is page 1.
     single = itemizer.parse_document("a\n\nb", "d")
     check(len(single) == 1 and single[0]["page"] == 1 and len(single[0]["items"]) == 2,
@@ -72,6 +91,8 @@ def main():
         all_items = [it for pg in fpages for it in pg["items"]]
         check(all("chapter" in it and "section" in it for it in all_items),
               "every item carries chapter and section keys")
+        check(all("order" in it for it in all_items),
+              "every item carries a document order")
         for page, num in [(1, "21.2.1"), (3, "21.2.2"), (4, "21.2.3")]:
             pg = next(p for p in fpages if p["page"] == page)
             tbl = next((it for it in pg["items"]

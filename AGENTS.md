@@ -119,6 +119,8 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   optional `ocr_pages` form field), `/ocr/<doc_id>` (async job), `/jobs/<id>` (poll,
   live `done`/`total` page counts), `/doc/<id>` (review page),
   `/page/<doc_id>/<n>.png` (rendered, cached), `/item/.../action`, `/item/.../delete`,
+  `/item/.../order` (set manual display order `{order: <finite number>}`,
+  int|float — non-finite/missing -> 400),
   `/bulk`.
   Jobs are an **in-memory dict** — lost on restart. `upload()` validates `ocr_pages`
   (`N`, `N-M`, or comma-separated like `2-3, 4-9`, 1-indexed; invalid -> 400) and
@@ -160,6 +162,13 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   key is gone). `/bulk` accepts
   `skip|accept|reject` with the same semantics: skip never touches finalized items,
   accept/reject flip them; already-in-target-state items are no-ops.
+  `apply_action` copies the item's `order` into the verified/rejected JSON
+  payloads, so KB exports follow it.
+  `doc_view` calls `_ensure_order(doc)` once per doc (persisted
+  `_order_stamped` marker): legacy docs get document order — re-parse the
+  md, stamp `order` by id onto existing items (bbox/drawn items tail the
+  page after the highest stamped order, in append order; deleted items are
+  not resurrected) — without touching review state.
   The draw-box route `/bbox_ocr` accepts an optional `type` (`auto` default, or
   `equation`/`table`/`text`, validated with 400 **before** OCR runs): `auto` keeps
   the old parse-the-crop + caption-attach behavior, forced kinds append ONE item
@@ -193,18 +202,23 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   or `{"doc_id":"__all__"}` → `{uploaded:[filenames], skipped:n}` (single doc
   404s when it has no verified items; `__all__` uploads every verified doc and
   counts doc dirs that yielded nothing).
-  Model: `GET /api/model` → `{loaded, key, job}` (key resolved by GGUF filename
-  suffix against `models.MODELS`; `job` = `{id, status, step}` for an in-flight
-  model swap, else null — the `MODEL_JOB_ID` module global points at the active
-  job and the worker clears it on done/error, so the header re-attaches progress
-  after a tab switch/reload; tabs are full page loads). `POST /api/model/load`
-  `{model:"ocr"|"chat"}` → `{status:"done", step:"already loaded"}` when the
-  target is resident (no GPU churn), else a background job in the shared `JOBS`
-  dict (`unloading <name>` → `loading <name>` → `done/loaded <name>` or
-  `error`), polled via `/jobs/<id>`. The worker ALWAYS calls
-  `models.unload(target)` before `models.load(key)` — unload-before-load is the
-  single-model invariant; `unload(None)` is a no-op when nothing is loaded.
-  Verified live 2026-09-03 against :8888.
+  Model: `GET /api/model` → `{loaded, available, job}` — `loaded` is the raw
+  resident path (string or null); `available` is `[{path, name}]` of the models
+  installed in Unsloth Studio via `models.list_models()` (a listing failure
+  degrades to `[]`, never a 502 — the header must not die over a listing
+  error); the `key` field is gone. `job` = `{id, status, step}` for an
+  in-flight model swap, else null — the `MODEL_JOB_ID` module global points at
+  the active job and the worker clears it on done/error, so the header
+  re-attaches progress after a tab switch/reload; tabs are full page loads.
+  `POST /api/model/load` `{model:"<path>"}` (non-empty literal path; empty ->
+  400) → `{status:"done", step:"already loaded"}` when the requested GGUF
+  filename is a suffix of the resident path (no GPU churn), else a background
+  job in the shared `JOBS` dict (`unloading <label>` → `loading <label>` →
+  `done/loaded <label>` or `error`, labels via `_model_label`: available-list
+  display name if known, else `Path(path).name`), polled via `/jobs/<id>`. The
+  worker ALWAYS calls `models.unload(current_path)` (raw loaded path; no-op
+  when nothing loaded) before `models.load(path)` — unload-before-load is the
+  single-model invariant. Verified live 2026-09-03 against :8888.
 - `rag_uploader.py` — reads `validation/verified/<doc_id>/*.json` (one folder per
   doc), groups items by
   `doc_id`, renders one markdown file per source doc (`source_name` header, per-item
@@ -236,7 +250,8 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   page's last section (continuation fragments like "where …"/"Notes: …"
   across page boundaries), and true orphans sort to the page tail; bold-marker
   statement titles also get their number via `_stmt_key`. Items
-  order by the numeric index of `item_id` (lexical sort put i10
+  order by `order` when present (manual/document number — floats allowed),
+  else by the numeric index of `item_id` (lexical sort put i10
   before i2)
   and uploads to an Unsloth Studio RAG KB (`/api/rag/knowledge-bases`, name via
   `--kb`, default "Verified OCR"). Server-side chunking + embeddings. Skips
@@ -263,15 +278,24 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   only if the re-test still drops a λ).
 - `models.py` — model management for Unsloth (stdlib urllib, `_api` raises
   RuntimeError → Flask maps to JSON 502; `--selftest` offline). `MODELS =
-  {"ocr": config.MODEL, "chat": config.CHAT_MODEL}`; `current_model()` =
-  `GET /api/inference/status` → `active_model` or first of `loaded[]` (None when
-  nothing resident); `unload(model_path, force=True)` posts to `/api/inference/
-  unload` with `force_cancel_active:true` (kills non-cancellable in-flight
-  generations; unknown/None path is a harmless no-op — verified live); `load(key)`
-  posts `{model_path, force_reload:true, max_seq_length?}` (per-key length from
-  config) and polls status (~2s, up to 120s) until the target reports loaded —
-  the backend may resolve a hub id to a local snapshot path, so readiness matches
-  by GGUF filename suffix. No CLI action besides `--selftest`.
+  {"ocr": config.MODEL, "chat": config.CHAT_MODEL}` is the default-role mapping,
+  kept for `_selftest` and config defaults (`load()` also accepts literal
+  paths); `current_model()` = `GET /api/inference/status` → `active_model` or
+  first of `loaded[]` (None when nothing resident); `list_models()` = `GET
+  /api/models/list` → `[{path, name}]`, defensively normalized from the
+  `models` array's `id`/`name` fields AND config defaults appended when the
+  backend list lacks them — GLM-OCR is a custom install the 82-model list
+  omits, so the dropdown would otherwise lose it (verified live 2026-09-03: 83
+  entries with the appended default); `unload(model_path, force=True)` posts to
+  `/api/inference/unload` with `force_cancel_active:true` (kills
+  non-cancellable in-flight generations; unknown/None path is a harmless no-op
+  — verified live); `load(model)` accepts a `MODELS` key ("ocr"/"chat" -> its
+  config path) or a literal path, posts `{model_path, force_reload:true,
+  max_seq_length?}` (length override ONLY when the path equals the chat/ocr
+  config default; other paths get the backend default) and polls status (~2s,
+  up to 120s) until the target reports loaded — the backend may resolve a hub
+  id to a local snapshot path, so readiness matches by GGUF filename suffix.
+  No CLI action besides `--selftest`.
 - `orchestrator.py` — RAG + tool-calling Q&A **engine + CLI only, no HTTP server**
   (stdlib + urllib, no deps). Question from `--question` or stdin (both empty →
   usage, exit 2; missing `UNSLOTH_API_KEY` → error, exit 1; `--max-tokens` default
@@ -322,7 +346,13 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
 - `itemizer.py` — splits markdown on `--- Page N ---`, extracts equations
   (`$$...$$` / `\[...\]`), **pipe tables and HTML `<table>...</table>`** (added to fix
   GLM-OCR answering HTML tables; HTML converted to `|...|` markdown), inline math
-  (`\(...\)` / `$...$`). Item order: equation → table → text-math → text, per page.
+  `(\(...\)` / `$...$`). Item order is **document order**: every item
+  carries `order` (1-based document position, stamped BEFORE the priority
+  sort — `_parse_page_body`'s kind/line sequence), and display/export sort
+  by `order`; the type-priority sort (equation → table → text-math → text)
+  survives only as the invisible deterministic id-assignment mechanism so
+  ids stay stable across merges/status restores. `order` is `int|float`
+  (floats allow inserting between numbered items).
   Every item carries `chapter`/`section` (nearest preceding `CHAPTER N` / dotted
   heading, `R21.2.1` kept, both reset per page; line-start anchored so inline
   refs/decimals never match; GLM-OCR bolds provision markers
@@ -337,16 +367,20 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   standalone CODE/COMMENTARY markers — applied **at export only** (verified JSON,
   not the review UI/doc).
 - `templates/_header.html` — shared top bar included by both pages (Jinja
-  includes inherit the render context, so `tab` / `page_model` arrive from the
-  route): browser-style tab strip (`[OCR Validation] [Chat]`, active tab via the
-  `tab` context var), the model bar (status chip polling `GET /api/model` +
-  **Load GLM-OCR** / **Load granite** buttons — the page's own model gets the
-  `primary` style via `page_model`; disabled while a swap job runs), a fixed
+  includes inherit the render context, so `tab` arrives from the route):
+  browser-style tab strip (`[OCR Validation] [Chat]`, active tab via the `tab`
+  context var), the model bar (status chip polling `GET /api/model` + a single
+  `#modelSel` dropdown of the installed models — `modelState()` fills it from
+  `j.available` (option value = path, text = name) and selects the loaded path
+  by GGUF-name suffix (appending it as an option when the backend list lacks
+  it) — plus a `#loadBtn` **Load** button posting the selected path to
+  `/api/model/load`; both disabled while a swap job runs), a fixed
   toast container, and shared JS: `toast()`, `progress()`/`clearProgress()`, a
   swap shows one live toast (`unloading <name>` → `loading <name>` →
   `✓ loaded <name>`, red toast on error),
   `pollModelJob(jobId)` (polls `/jobs/<id>`; shared by load and by re-attach),
-  `loadModel(key, name)` (posts `/api/model/load`, delegates to `pollModelJob`),
+  `loadModel()` (posts the dropdown's selected path to `/api/model/load`,
+  delegates to `pollModelJob`),
   `modelState()` (chip on load; if `/api/model` reports a running `job`, shows the
   progress toast and calls `pollModelJob` — this is how progress survives a tab
   switch, since tabs are full page loads), and `window.kbFetch()` (GET /api/kb
@@ -371,6 +405,12 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   The item counter always reflects the current page — pages with no items (e.g.
   outside the OCR page range) show "no items on page N", never a stale count from
   a previously-viewed page.
+  Server page items arrive in priority (id-assignment) order; `render()` calls
+  `sortItems()` first, which re-sorts each page by `order` (missing order →
+  Infinity, so legacy items keep their array order after ordered ones — stable
+  sort). Each item gets a small editable **order number** input (`.order`, in
+  the action row); editing it posts `{order}` to `/item/<doc_id>/<item_id>/order`
+  and re-renders in the new order (floats insert between existing orders).
   An "OCR'd pages only" checkbox (`onlyOcr`) restricts `#pageSel` and prev/next to
   pages in `DOC.pages` (pages with ≥1 item; falls back to all pages when there are
   none), via `navPages()` (filtered list or full 1..n) and `stepPage(dir)` (steps the
@@ -415,16 +455,29 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   flow is untouched). Every item has a Delete button — `confirm()` then POST
   `/item/<doc>/<item>/delete`, re-render, no cursor advance; the item and its
   verified/rejected copies are removed.
-- `templates/chat.html` — chat page (`tab="chat"`, `page_model="chat"`; loads a
-  session from `?s=<sid>`, `const SESSION` is `null` when none — routes guard
-  that). Sidebar: sessions list (click to switch) + new / rename / delete;
+- `templates/chat.html` — chat page (`tab="chat"`; loads a session from
+  `?s=<sid>`, `const SESSION` is `null` when none — routes guard that).
+  Sidebar: sessions list (click to switch) + new / rename / delete;
   lazy-creates a session on first send. Thread: user right / assistant left,
-  text-only (`pre-wrap`). KB selector with a "no KB" option — per-session
-  `kb_id`, PATCHed to the session on change. **Developer mode** toggle: when
-  on, the message POST carries `developer:true` and each reply gets a
-  collapsible `▸ developer trace` `<pre>` (escaped monospace, no MathJax)
-  with rows for retrieval chunks / reasoning / messages / tool calls+results.
-  Traces are live, never persisted; sessions render from the server's JSON.
+  **markdown via marked@15 CDN** (tables/bold/headers/lists, `breaks:true`)
+  **+ LaTeX via MathJax**, rendered with `renderMarkdown()`: escape `&`/`<`,
+  swap whole math spans (`\(…\)`/`\[…\]`/`$$…$$`/`$…$`) for NUL placeholders so
+  marked's inline escape rule can't strip the `\(`/`\[` backslashes or mangle
+  `_`/`^` inside math, `marked.parse`, restore placeholders, then
+  `MathJax.typesetPromise([el])`. Restore uses a **replacer function**: a
+  string replacement would interpret `$` in the math — display `$$…$$` spans
+  collapse to `$` and `$&`/`$\``/`$'`/`$1` mangle (verified 2026-09-03). DOM
+  insertion via `createContextualFragment`
+  + `replaceChildren` (no `innerHTML`), plus a link-scheme guard (non-http(s)/
+  relative href|src -> dead `#`). `.msg` keeps `overflow-wrap` instead of
+  `pre-wrap` (`breaks:true` supplies line breaks); minimal table CSS added;
+  error/toast paths and the dev trace stay plain text. KB selector with a "no
+  KB" option — per-session `kb_id`, PATCHed to the session on change.
+  **Developer mode** toggle: when on, the message POST carries
+  `developer:true` and each reply gets a collapsible `▸ developer trace`
+  `<pre>` (escaped monospace, no MathJax/markdown) with rows for retrieval
+  chunks / reasoning / messages / tool calls+results. Traces are live, never
+  persisted; sessions render from the server's JSON.
 - `validation/` — `pending/` (docs), `verified/<doc_id>/`, `rejected/<doc_id>/` (per-item JSON), `uploads/<doc_id>/` (pdf, md, page PNGs).
 - `functions/beam_calc.py` — self-contained, **stdlib-only** (math; numpy/matplotlib/argparse/yaml dropped) ACI 318M-19 beam shear/flexure calcs extracted from the BeamValidation repo
   (github.com/Siboi420/BeamValidation, commit `668be3670dc8ba065f215a0ca1b59eb9e3bd8ca5`, `scripts/RCBeam_moment_capacity.py`). Public: `min_shear_reinf(b_w, f_c, f_yt)` → Av,min per metre (mm²/m, §9.6.3.3, `max(0.062·√f'c·b_w/f_yt, 0.35·b_w/f_yt)·1000`); `shear_capacity(b, d=None, f_c=None, A_v=0, s=0, f_yw=0, A_s=None, V_u=None, M_u=None, h=None, cover_cg=None)` → wrapped `compute_aci_shear` — effective depth is **d, or h with cover_cg (d = h − cover_cg), never both (loud XOR ValueError), rejected cover_cg ≥ h**, Vc rows: simplified `§22.5.5.1(a)`; detailed `(b)` only when stirrups ≥ Av,min AND A_s+V_u+M_u given, capped `§22.5.8.5.3`-adjacent `0.29·λ·√f'c·b·d`; **size-effect `(c)` when stirrups < Av,min (or absent) and A_s given: `λ_s = min(√(2/(1+d/250)), 1)` (§22.5.5.1.3), `V_c = 0.66·λ_s·λ·ρ_w^⅓·√f'c·b·d`**; Av,min comparison via `min_shear_reinf(b, f_c, f_yw)·s/1000` (reused, not duplicated); stirrups adequate ⇔ that inequality; φ_v=0.75; returns `Vc_criterion` ("row (a)"|"row (b)"|"row (c)") + `lambda_s` on top of the numeric keys; `flex_capacity(b, d=None, A_s=None, f_c=None, f_yl=None, h=None, cover_cg=None)` → wrapped `compute_aci_flexure` (stress block §22.2.2.1, β₁ §22.2.2.4.3, φ Table 21.2.2), same d/h XOR path. Constants EPSILON_CU=0.003, Es=2e5, λ=1.0.
@@ -500,10 +553,31 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   to 120s, matching by GGUF filename suffix). Model swap verified live:
   `POST /api/model/load` with nothing loaded → `unloading resident` (no-op) →
   `loading GLM-OCR` → `done/loaded GLM-OCR`; second load short-circuits `already
-  loaded`. Smoke test grew 132 → **189 backend-testable checks** (sessions CRUD,
+  loaded`. Smoke test grew 132 → **212 backend-testable checks** (sessions CRUD,
   chat message echo/persist/trace-kinds, KB routes + upload incl. `__all__` via a
   stubbed `rag_uploader._api` and a temp `VERIFIED_DIR`, model swap states with
   `models.*` stubbed, header/tab render on both pages).
+- **Chat markdown+LaTeX + dynamic model picker (implemented 2026-09-03):**
+  chat messages render markdown (tables/bold/headers/lists via marked@15 CDN)
+  and LaTeX (`\(…\)`/`\[…\]`/`$$…$$`/`$…$` via MathJax) through the math-span
+  placeholder pipeline in `renderMarkdown()` (escape → protect math → marked →
+  restore → typeset; DOM via `createContextualFragment`/`replaceChildren`, no
+  `innerHTML`; link schemes guarded). The two hardcoded Load buttons are one
+  dropdown: `GET /api/model` returns `{loaded, available, job}` where
+  `available` lists the installed models (`GET /api/models/list` — verified
+  live; GLM-OCR is a custom install absent from that list, so
+  `models.list_models()` appends config defaults), and `POST /api/model/load`
+  takes a literal model path with GGUF-suffix "already loaded" matching.
+  Smoke test now 212 checks.
+- **Manual item ordering (implemented 2026-09-03):** every item carries
+  `order` — document position by default, editable per page via `POST
+  /item/<doc_id>/<item_id>/order` `{order: <int|float>}` (floats insert
+  between existing orders; non-finite/missing -> 400). The review page and
+  KB exports (`rag_uploader._item_order` prefers `order`) sort by it; the
+  type-priority sort survives only as id assignment, so ids/merge-restore
+  are unchanged. Drawn-box items get page-tail orders. `doc_view` runs
+  `_ensure_order` once per legacy doc (`_order_stamped` marker) so existing
+  docs get document order without losing review state.
 - **Voice / AIRI roadmap (later):** docs-only this round (`docs/voice-roadmap.md`);
   no voice code or new deps. Target: browser mic → STT → chat session store →
   `orchestrator.answer_turn` → TTS → playback, with planned `POST /api/voice/stt`
@@ -533,6 +607,19 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   cancellable via `POST /api/inference/cancel` (returns `cancelled: 0`, they're not
   registered). The working kill is unload with `force_cancel_active: true`. If you need
   cancelable OCR, add `"stream": true` to the payload.
+- **Chat math spans must stay whole for marked**: the chat markdown pipeline
+  swaps `\(…\)`/`\[…\]`/`$$…$$`/`$…$` out for NUL placeholders BEFORE
+  `marked.parse` — marked's inline escape rule otherwise strips the `\(`/`\[`
+  backslashes and mangles `_`/`^` inside math. Restoring placeholders after
+  parsing (before DOM insertion) is what keeps MathJax math intact; NUL can't
+  occur in real content. The trace `<pre>` and error paths bypass the pipeline
+  on purpose (plain text only).
+- **The `model` field orchestrator/OCR send is ignored by llama-server**:
+  `orchestrator.chat()` and `ocr_engine` keep sending the config-default model
+  name; the backend answers with the *loaded* model (single-model server),
+  which is exactly what the app manages via unload-before-load. Assumption
+  as of 2026-09-03; if the backend ever rejects a mismatched `model`, switch
+  those payloads to `models.current_model()`.
 - **App respawns**: don't assume a `kill`/`pkill` sticks — verify with `curl`.
 - **WSL GPU**: `/dev/dxg` is the paravirtualized path; `nvidia-smi` works via
   `/usr/lib/wsl/lib/nvidia-smi`. Unsloth's `POST /api/llama/backend` is the supported
@@ -542,11 +629,11 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
 
 ## Tests / verification
 
-- `python3 test_itemizer.py` — 68 itemizer assertions.
+- `python3 test_itemizer.py` — 73 itemizer assertions.
 - `python3 functions/test_shear_tools.py` — 19 hand-calc checks for the `functions/` shear/flexure tools (Av,min mm²/m, simplified Vc, row (c) size-effect Vc incl. λ_s + ρ_w, adequate-stirrup rows (a)/(b), partial stirrups → row (c) + V_s, d↔h/cover_cg equivalence for shear and flex, d-resolution errors (XOR/neither/cover≥h), row (a) fallback, wrapper shape + unit/basis incl. h-path, validation error paths); plain asserts + PASS/FAIL, exit non-zero on failure.
-- `python3 smoke_test.py` — 189 end-to-end checks via Flask test client (no live OCR,
-  no backend; `rag_uploader._api`, `models.current_model/unload/load`, and
-  `orchestrator.answer_turn` stubbed where they'd hit :8888):
+- `python3 smoke_test.py` — 212 end-to-end checks via Flask test client (no live OCR,
+  no backend; `rag_uploader._api`, `models.current_model/unload/load/list_models`,
+  and `orchestrator.answer_turn` stubbed where they'd hit :8888):
   the original 132 assert `?ocr=1` redirect, no-key OCR error,
   `parse_page_range`/`parse_page_ranges`
   valid+invalid forms, `ocr_pages` storage incl. multiple ranges, invalid -> 400,
@@ -567,12 +654,21 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   KB routes (list/create/rename/delete issue the right Unsloth calls + shapes,
   blank names -> 400, bad kb id -> 404, single-doc + `__all__` upload with
   expected `uploaded` filenames via a temp `VERIFIED_DIR`), model API
-  (`/api/model` reflects stubbed status + key resolution + the in-flight `job`
-  field (running synthetic job → exposed; cleared on done/idle), already-loaded
-  short-circuit with no calls, cold swap `unload` before `load` with
-  unloading/loading steps captured in-stub, warm swap unloads the GLM path,
-  load error -> `error` propagated), and shared-header renders on both pages
-  (active tab + model control).
+  (`/api/model` reflects stubbed status + the `available` list (no `key`
+  field) + the in-flight `job` field (running synthetic job → exposed; cleared
+  on done/idle), already-loaded short-circuits by path suffix with no calls,
+  missing/empty model path -> 400, cold swap `unload` before `load` with
+  unloading/loading steps captured in-stub and literal config paths passed
+  through, warm swap unloads the GLM path, load error -> `error` propagated),
+  and shared-header renders on both pages (active tab + model `#modelSel`
+  dropdown + `#loadBtn`; `/chat` also carries the marked CDN script).
+  the new 22 add manual ordering: `POST /item/.../order` sets/persists order and
+  reorders the page (missing/non-numeric/NaN/inf -> 400, unknown item -> 404),
+  `order` carried into accepted+rejected JSON payloads, a fresh `parse_document`
+  re-stamps document order, `_ensure_order` on a legacy doc (stamp marker,
+  every item stamped, no resurrection of a deleted item, bbox item tails the
+  page, review status/edited content preserved), and `merge_pages_into_doc`
+  preserving a manually-edited `order`; bbox helpers assign order.
 - `python3 orchestrator.py --selftest` — offline PASS: schema glob yields exactly
   the 3 tool names in the right shape, tool-call extraction parses both synthetic
   native `tool_calls` and `<tool_call>`-marker payloads, round-trip/`_norm_args`
@@ -583,7 +679,10 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
 - `python3 rag_uploader.py --selftest` — offline grouping/ordering/Unicode/empty-skip
   checks (unchanged but now with `_api` raising RuntimeError).
 - `python3 models.py --selftest` — offline: `MODELS` wiring + `load("chat")`
-  payload shape (`model_path`/`force_reload`/`max_seq_length=32768`).
+  payload shape (`model_path`/`force_reload`/`max_seq_length=32768`), literal
+  path `load("some/local/model-GGUF")` posts that path with no
+  `max_seq_length`, and `list_models()` normalizes `{models:[{id,name}]}` and
+  appends config defaults.
 - A quick GPU/alive check: `curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:5000/`
   (app) and `:8888` (unsloth); `nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader`
   should show >0% during OCR.

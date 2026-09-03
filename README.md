@@ -12,12 +12,15 @@ A single Flask server on `:5000` serves everything — two browser-style tabs:
   item-by-item (tables, equations, text), accept / edit / reject / skip, and
   export verified JSON. Draw a box on the page to OCR just that region.
 - **Chat** — multi-turn sessions against the "Verified OCR" KB (hybrid RAG,
-  top_k=3) + 3 ACI beam calculation tools (shear/flexure). Developer mode
-  shows the retrieval / reasoning / tool-call trace.
+  top_k=3) + 3 ACI beam calculation tools (shear/flexure). Answers and
+  messages render **markdown** (tables, bold, headers, lists) **and LaTeX**.
+  Developer mode shows the retrieval / reasoning / tool-call trace.
 
-Both pages share a top bar with the **model control**: which model is loaded
-(GLM-OCR for OCR, granite for chat; only one resident at a time) and buttons
-to load/unload — a swap is always unload-before-load with a progress toast.
+Both pages share a top bar with the **model control**: a chip showing which
+model is loaded plus a dropdown of the models installed in Unsloth Studio and
+a Load button — the backend holds one resident model at a time, so a swap is
+always unload-before-load with a progress toast. The two defaults are GLM-OCR
+for OCR and granite for chat; any installed model can be picked.
 
 Knowledge bases (Unsloth RAG) can be listed / created / renamed / deleted and
 fed verified items from the OCR tab (one doc or all).
@@ -28,11 +31,11 @@ fed verified items from the OCR tab (one doc or all).
 - [Unsloth Studio](https://github.com/unslothai/unsloth) running on `:8888`
   (serves the GGUF models + RAG)
 - `UNSLOTH_API_KEY` in `.env.local` (see below)
-- The two GGUF models available to Unsloth:
-  - `ggml-org/GLM-OCR-GGUF` (OCR)
-  - `unsloth/granite-4.1-8b-GGUF` (chat — the GGUF download is a one-time
-    step, triggered from the Unsloth UI's model-load; the app only loads
-    what's cached)
+- The models you want to use available to Unsloth (installed via the Unsloth
+  UI; defaults that the app wires up: `ggml-org/GLM-OCR-GGUF` for OCR,
+  `unsloth/granite-4.1-8b-GGUF` for chat — the GGUF download is a one-time
+  step; the app only loads what's cached, and the top-bar dropdown lists
+  whatever is installed)
 
 ```bash
 pip install -r requirements-ocr.txt
@@ -64,27 +67,27 @@ Open <http://127.0.0.1:5000>.
 ## Tests
 
 ```bash
-python3 test_itemizer.py                 # 68 itemizer assertions
+python3 test_itemizer.py                 # 73 itemizer assertions
 python3 functions/test_shear_tools.py    # 19 beam tool checks
 python3 orchestrator.py --selftest       # chat loop trace checks (offline)
 python3 rag_uploader.py --selftest       # KB render checks (offline)
 python3 models.py --selftest             # model mgmt wiring (offline)
-python3 smoke_test.py                    # 186 end-to-end route checks (no
+python3 smoke_test.py                    # 212 end-to-end route checks (no
                                               # live OCR)
 ```
 
 ## Layout
 
-- `app.py` — the Flask server (OCR review + chat sessions + KB routes + model bar)
+- `app.py` — the Flask server (OCR review + chat sessions + KB routes + model dropdown)
 - `ocr_engine.py` / `itemizer.py` — GLM-OCR client, markdown → review items
 - `rag_uploader.py` — verified JSON → Unsloth RAG KB (render + upload)
 - `orchestrator.py` — RAG + tool-calling chat engine (CLI + importable by app)
-- `models.py` — Unsloth model load/unload/status
+- `models.py` — Unsloth model list / load / unload / status
 - `functions/` — ACI 318M-19 beam shear/flexure tools (`beam_calc.py`,
   schema-driven `wrapper.py`)
 - `schemas/` — OpenAI function-calling tool schemas
-- `templates/` — `_header.html` (tabs + model bar), `index.html` (OCR),
-  `chat.html` (chat + dev trace)
+- `templates/` — `_header.html` (tabs + model dropdown), `index.html` (OCR),
+  `chat.html` (chat: markdown + LaTeX rendering, dev trace)
 - `docs/` — infrastructure, KB query guidance, corrections, voice roadmap
 - `validation/` — pending docs, verified/rejected item JSON (gitignored)
 - `sessions/` — chat sessions (gitignored)

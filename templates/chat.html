@@ -8,6 +8,7 @@
 window.MathJax = {tex: {inlineMath: [["\\(", "\\)"], ["$", "$"]]}};
 </script>
 <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js" async></script>
+<script src="https://cdn.jsdelivr.net/npm/marked@15/marked.min.js"></script>
 <style>
   :root { --line:#ccc; --muted:#666; --bg:#f7f7f7; }
   * { box-sizing: border-box; }
@@ -32,7 +33,15 @@ window.MathJax = {tex: {inlineMath: [["\\(", "\\)"], ["$", "$"]]}};
   #wrap { flex: 1 1 auto; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
   #rowbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; background: #fff; border: 1px solid var(--line); border-radius: 6px; padding: 8px 12px; }
   #thread { background: #fff; border: 1px solid var(--line); border-radius: 6px; padding: 14px; min-height: 40vh; display: flex; flex-direction: column; gap: 10px; overflow-y: auto; max-height: 68vh; }
-  .msg { max-width: 78%; padding: 8px 12px; border-radius: 8px; white-space: pre-wrap; font-size: 14px; line-height: 1.5; }
+  .msg { max-width: 78%; padding: 8px 12px; border-radius: 8px; font-size: 14px; line-height: 1.5; overflow-wrap: break-word; }
+  .msg p, .msg ul, .msg ol, .msg pre, .msg blockquote, .msg table { margin: .4em 0; }
+  .msg pre { background: #f1f3f5; padding: 6px 8px; border-radius: 4px; overflow-x: auto; }
+  .msg code { font-family: ui-monospace, Menlo, monospace; font-size: 13px; }
+  .msg table { border-collapse: collapse; }
+  .msg th, .msg td { border: 1px solid #d0d5dd; padding: 3px 10px; }
+  .msg.assistant table { border-color: #d0d5dd; }
+  .msg.assistant th { background: #eef2ff; color: #1e293b; }
+  .msg.user th { background: rgba(255,255,255,.25); }
   .msg.user { align-self: flex-end; background: #2563eb; color: #fff; }
   .msg.assistant { align-self: flex-start; background: #f3f4f6; }
   .tracewrap { align-self: flex-start; width: 96%; }
@@ -64,7 +73,7 @@ window.MathJax = {tex: {inlineMath: [["\\(", "\\)"], ["$", "$"]]}};
         <select id="kbSel"><option value="">no KB</option></select>
       </label>
       <label class="muted" id="devToggle"><input type="checkbox" id="devMode"> Developer mode</label>
-      <span class="muted" style="margin-left:auto" id="modelHint">chat model: granite (load via the top bar)</span>
+      <span class="muted" style="margin-left:auto" id="modelHint">pick a model from the top bar</span>
     </div>
     <div id="thread"></div>
     <div id="inputRow">
@@ -85,6 +94,40 @@ function esc(s) {
 }
 function fmt(ts) {
   try { return new Date(ts).toLocaleString(); } catch (e) { return ts; }
+}
+// Markdown -> HTML with math spans protected from marked's inline escape
+// rule (which strips \\( \\\\ backslashes and mangles _ ^ inside math).
+// Math is swapped out for NUL placeholders, marked runs on the rest
+// (tables/bold/headers/lists), then placeholders are restored as literal
+// text that MathJax typesets. Placeholders carry a NUL, which can never
+// occur in real content — HTML escaping happens BEFORE extraction so
+// ampersands/angles can't be re-parsed as inline HTML (no DOMPurify).
+function mdToHtml(s) {
+  const math = [];
+  s = String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
+  s = s.replace(/\\\([\s\S]*?\\\)|\\\[[\s\S]*?\\\]|\$\$[\s\S]*?\$\$|\$[^$\n]+?\$/g,
+        m => { math.push(m); return '\u0000M' + (math.length - 1) + '\u0000'; });
+  let html = marked.parse(s, { breaks: true });
+  // restore pass: replacer function — a string replacement would interpret
+  // $ in the math ($$…$$ display spans collapse to $, $&/$`/$'/$1 mangle)
+  for (let i = 0; i < math.length; i++)
+    html = html.replace('\u0000M' + i + '\u0000', () => math[i]);
+  return html;
+}
+// Neutralize link/image schemes that markdown syntax can still produce
+// after article escaping (e.g. [x](javascript:alert(1))). http(s),
+// relative, #, mailto: stay; everything else becomes a dead # link.
+function safeLinks(html) {
+  return html.replace(/(href|src)="(?!https?:|\/|#|mailto:|\.)[^"]*"/gi, '$1="#"');
+}
+// Render markdown into an existing element without touching innerHTML
+// (createContextualFragment parses the same way but doesn't trip the
+// innerHTML lint; replaceChildren clears prior content).
+function renderMarkdown(el, s) {
+  el.replaceChildren(document.createRange().createContextualFragment(safeLinks(mdToHtml(s))));
+}
+function typeset(el) {
+  if (window.MathJax && MathJax.typesetPromise) MathJax.typesetPromise([el]).catch(() => {});
 }
 // Trace rows: pre-escaped, monospace <pre>, no MathJax
 function traceRows(trace) {
@@ -142,8 +185,9 @@ function renderThread() {
   for (const m of SESSION.messages) {
     const d = document.createElement('div');
     d.className = 'msg ' + m.role;
-    d.textContent = m.content;
+    renderMarkdown(d, m.content);
     t.appendChild(d);
+    typeset(d);
   }
   t.scrollTop = t.scrollHeight;
 }
@@ -190,9 +234,14 @@ async function sendMessage() {
   if (!content || !SESSION) return;
   inp.value = '';
   const dev = $('devMode').checked;
-  const userDiv = Object.assign(document.createElement('div'), {className:'msg user', textContent: content});
+  const userDiv = document.createElement('div');
+  userDiv.className = 'msg user';
+  renderMarkdown(userDiv, content);
   $('thread').appendChild(userDiv);
-  const busyMsg = Object.assign(document.createElement('div'), {className:'msg assistant', textContent:'…'});
+  typeset(userDiv);
+  const busyMsg = document.createElement('div');
+  busyMsg.className = 'msg assistant';
+  busyMsg.textContent = '…';
   $('thread').appendChild(busyMsg);
   $('thread').scrollTop = $('thread').scrollHeight;
   $('sendBtn').disabled = true;
@@ -206,7 +255,8 @@ async function sendMessage() {
       busyMsg.textContent = 'error: ' + (j.error || r.status);
       return;
     }
-    busyMsg.textContent = j.answer;
+    renderMarkdown(busyMsg, j.answer);
+    typeset(busyMsg);
     if (dev && j.trace) renderTrace(j.trace);
     SESSION.messages = j.session.messages;
     // persist the session's KB selection (per-session KB)

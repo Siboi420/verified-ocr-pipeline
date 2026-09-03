@@ -50,6 +50,7 @@ window.MathJax = {tex: {inlineMath: [["\\(", "\\)"], ["$", "$"]]}};
   table.grid td.merged { background: #f5f3ff; }
   table.grid input { width: 100%; border: 1px solid #ddd; border-radius: 3px; padding: 3px 5px; font-size: 13px; }
   .actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  input.order { width: 3.5em; border: 1px solid var(--line); border-radius: 4px; padding: 4px 6px; }
   .ok { color: #065f46; } .err { color: #991b1b; }
   #ocrbar { display: none; padding: 8px 12px; border-radius: 6px; margin-bottom: 12px; background: #eff6ff; border: 1px solid #bfdbfe; }
   .pill { font-size: 12px; background:#eef2ff; border-radius: 10px; padding: 2px 8px; }
@@ -276,6 +277,17 @@ async function post(url, body) {
 function flatItems() {
   return (DOC.pages || []).flatMap(pg =>
     pg.items.map(it => ({...it, page: pg.page})));
+}
+
+// Servers ship page items in priority order (the id-assignment order); the
+// display/navigation order is `order` — document order by default, manual
+// after a reorder. Missing order falls back to Infinity so unordered legacy
+// items keep their array order after all ordered ones (stable sort).
+function sortItems() {
+  for (const pg of ((DOC && DOC.pages) || [])) {
+    (pg.items || []).sort((a, b) =>
+      ((a.order ?? Infinity) - (b.order ?? Infinity)));
+  }
 }
 
 function escapePipe(s) { return s.replace(/\|/g, "\\|"); }
@@ -546,7 +558,18 @@ function renderItem(it) {
 
   const actions = document.createElement("div");
   actions.className = "actions";
-  actions.innerHTML = `
+  const orderLabel = document.createElement("label");
+  orderLabel.className = "muted";
+  orderLabel.title = "display order on this page (numbers can be fractional to insert between)";
+  orderLabel.appendChild(document.createTextNode("order "));
+  const orderIn = document.createElement("input");
+  orderIn.type = "text";
+  orderIn.className = "order";
+  orderIn.size = 4;
+  orderIn.value = it.order !== undefined ? it.order : "";
+  orderLabel.appendChild(orderIn);
+  actions.appendChild(orderLabel);
+  actions.innerHTML += `
     <input type="checkbox" class="pick" title="select for bulk">
     <button class="act accept">Accept</button>
     <button class="act edit">Edit + Accept</button>
@@ -642,6 +665,7 @@ function updateCounter() {
 }
 
 function render() {
+  sortItems();
   const pages = DOC.pages || [];
   const covered = pages.filter(p => (p.items || []).length > 0).length;
   document.getElementById("ocrCoverage").textContent =
@@ -777,6 +801,13 @@ document.getElementById("items").addEventListener("click", async e => {
     await act(itemId, "reject");
   } else if (cls.includes("skip")) {
     await act(itemId, "skip");
+  } else if (cls.includes("order")) {
+    const input = el.querySelector("input.order");
+    const o = parseFloat(input.value);
+    if (!Number.isFinite(o)) { alert("Order must be a finite number"); return; }
+    const out = await post(`/item/${DOC.doc_id}/${itemId}/order`, {order: o});
+    Object.assign(DOC, out.doc);
+    render();
   } else if (cls.includes("del")) {
     if (!confirm("Delete this item?")) return;
     const out = await post(`/item/${DOC.doc_id}/${itemId}/delete`, {});

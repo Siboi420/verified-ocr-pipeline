@@ -1,8 +1,6 @@
-{# Shared top bar: browser-style tabs, model status chip + load buttons, and
-   a toast container. Included by index.html (page_model="ocr") and chat.html
-   (page_model="chat"). The page's own model gets the primary button styling.
-   Jinja includes inherit the render context, so page_model arrives from the
-   route. #}
+{# Shared top bar: browser-style tabs, model dropdown + status chip, and
+   a toast container. Included by index.html and chat.html. The dropdown
+   lists the models installed in Unsloth Studio (GET /api/model). #}
 <style>
   .topbar { display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
   .tabs { display: flex; gap: 4px; }
@@ -16,9 +14,9 @@
                border-radius: 10px; padding: 2px 10px; max-width: 340px; overflow: hidden;
                text-overflow: ellipsis; white-space: nowrap; }
   #modelChip.loaded { background: #ecfdf5; color: #065f46; }
+  #modelSel { font-size: 12px; max-width: 280px; }
   #modelBar button { font-size: 12px; padding: 3px 10px; }
-  #modelBar button.primary { background: #2563eb; color: #fff; border-color: #2563eb; }
-  #modelBar button:disabled { opacity: .5; cursor: default; }
+  #modelBar button:disabled, #modelSel:disabled { opacity: .5; cursor: default; }
   #toasts { position: fixed; top: 10px; right: 10px; z-index: 99; display: flex;
             flex-direction: column; gap: 6px; max-width: 420px; }
   .toast { background: #111827; color: #fff; padding: 8px 12px; border-radius: 6px;
@@ -35,10 +33,8 @@
   <div id="modelBar">
     <span class="muted">Model:</span>
     <span id="modelChip">…</span>
-    <button id="loadOcrBtn" class="{{ 'primary' if page_model == 'ocr' else '' }}"
-            onclick="loadModel('ocr','GLM-OCR')">Load GLM-OCR</button>
-    <button id="loadChatBtn" class="{{ 'primary' if page_model == 'chat' else '' }}"
-            onclick="loadModel('chat','granite')">Load granite</button>
+    <select id="modelSel" title="models installed in Unsloth Studio"></select>
+    <button id="loadBtn" onclick="loadModel()">Load</button>
   </div>
 </div>
 <div id="toasts"></div>
@@ -65,7 +61,34 @@ function clearProgress() {
   if (progressToast) { progressToast.remove(); progressToast = null; }
 }
 function setModelBusy(b) {
-  document.querySelectorAll('#modelBar button').forEach(btn => btn.disabled = b);
+  document.getElementById('modelSel').disabled = b;
+  document.getElementById('loadBtn').disabled = b;
+}
+// Select the loaded model in the dropdown. The loaded path may be a
+// resolved local snapshot, so match by GGUF filename suffix; when it's
+// absent from the list, append it as an option so it stays visible.
+function fillModelSel(available, loaded) {
+  const sel = document.getElementById('modelSel');
+  sel.innerHTML = '';
+  let match = null;
+  for (const m of (available || [])) {
+    if (!m || !m.path) continue;
+    const o = document.createElement('option');
+    o.value = m.path;
+    o.textContent = m.name || m.path;
+    sel.appendChild(o);
+    if (loaded && (m.path === loaded || (m.path.split('/').pop() && loaded.includes(m.path.split('/').pop()))))
+      match = o;
+  }
+  if (loaded && !match) {
+    const o = document.createElement('option');
+    o.value = loaded;
+    o.textContent = loaded;
+    sel.appendChild(o);
+    match = o;
+  }
+  if (match) sel.value = match.value;
+  else if (sel.options.length) sel.value = sel.options[0].value;
 }
 async function pollModelJob(jobId) {
   setModelBusy(true);
@@ -91,21 +114,25 @@ async function modelState() {
     const chip = document.getElementById('modelChip');
     chip.textContent = j.loaded ? j.loaded : 'none loaded';
     chip.classList.toggle('loaded', !!j.loaded);
+    fillModelSel(j.available, j.loaded);
     if (j.job && j.job.status === 'running') {
       progress(j.job.step || '…');
       pollModelJob(j.job.id);  // re-attach progress after a tab switch / reload
     }
   } catch (e) { /* backend down: leave the chip as-is */ }
 }
-async function loadModel(key, name) {
-  if (Array.from(document.querySelectorAll('#modelBar button')).some(b => b.disabled)) return;
+async function loadModel() {
+  const sel = document.getElementById('modelSel');
+  if (sel.disabled) return;
+  const path = sel.value;
+  if (!path) return;
   setModelBusy(true);
   try {
     const r = await fetch('/api/model/load', {method:'POST',
-      headers:{'Content-Type':'application/json'}, body: JSON.stringify({model:key})});
+      headers:{'Content-Type':'application/json'}, body: JSON.stringify({model:path})});
     const j = await r.json();
     if (j.status === 'done') {
-      toast(j.step === 'already loaded' ? name + ' already loaded' : j.step, 'done');
+      toast(j.step === 'already loaded' ? 'already loaded' : j.step, 'done');
       modelState();
     } else if (j.error) {
       toast('error: ' + j.error, 'error');
