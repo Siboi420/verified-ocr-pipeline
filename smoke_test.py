@@ -138,16 +138,33 @@ def main():
     check(r.status_code == 200 and r.mimetype == "image/png" and len(r.data) > 1000,
           "page PNG served")
 
-    # --- manual order: POST order sets it, page reorders, validation 400s ---
+    # --- manual order: POST order moves the item to a 1..n page position ---
     eq_id0 = p1[0]["id"]  # equation (doc position 3 on page 1)
-    r = client.post(f"/item/{doc_id}/{eq_id0}/order", json={"order": 1.5})
+    def set_order(item_id, o, doc_id_=doc_id):
+        return client.post(f"/item/{doc_id_}/{item_id}/order", json={"order": o})
+    def page_orders(doc_id_=doc_id):
+        return {it["id"]: it["order"] for it in
+                read_json(REPO / "validation" / "pending" / f"{doc_id_}.json")["pages"][0]["items"]}
+
+    r = set_order(eq_id0, 1)
     check(r.status_code == 200, "order route 200")
     out1 = r.get_json()["doc"]["pages"][0]["items"]
-    check(next(i for i in out1 if i["id"] == eq_id0)["order"] == 1.5,
-          "order persisted on the item")
-    by_order = sorted(out1, key=lambda i: (i.get("order") is None, i.get("order", 0)))
-    check(by_order[0]["id"] != eq_id0 and by_order[1]["id"] == eq_id0,
-          "sorting by order places the reordered equation between orders 1 and 2")
+    po = {it["id"]: it["order"] for it in out1}
+    check(po[eq_id0] == 1, "moved item holds order 1")
+    check(sorted(po.values()) == list(range(1, len(po) + 1)),
+          "page orders are contiguous 1..n after the move")
+    fresh0 = appmod.parse_document(md_path.read_text(), doc_id)[0]["items"]
+    prev1 = next(it for it in fresh0 if it["order"] == 1)
+    check(po[prev1["id"]] == 2 and prev1["id"] != eq_id0,
+          "the item at old position 1 shifted to position 2")
+
+    # clamps and rounding: 99 -> tail (n), 0 -> 1, 2.7 -> 3
+    check(set_order(eq_id0, 99).status_code == 200 and page_orders()[eq_id0] == len(out1),
+          "order 99 clamps to page tail")
+    check(set_order(eq_id0, 0).status_code == 200 and page_orders()[eq_id0] == 1,
+          "order 0 clamps to 1")
+    check(set_order(eq_id0, 2.7).status_code == 200 and page_orders()[eq_id0] == 3,
+          "order 2.7 rounds to position 3")
     check(client.post(f"/item/{doc_id}/{eq_id0}/order", json={}).status_code == 400,
           "order missing -> 400")
     check(client.post(f"/item/{doc_id}/{eq_id0}/order", json={"order": "abc"}).status_code == 400,
@@ -164,12 +181,12 @@ def main():
     # touches the doc JSON only)
     r = client.post(f"/item/{doc_id}/{eq_id0}/action", json={"action": "accept"})
     ev = read_json(REPO / "validation" / "verified" / "smoke" / f"{eq_id0}.json")
-    check(r.status_code == 200 and ev.get("order") == 1.5,
-          "accepted JSON carries the item's order")
+    check(r.status_code == 200 and ev.get("order") == 3,
+          "accepted JSON carries the item's position (3 after the 2.7 move)")
     r = client.post(f"/item/{doc_id}/{eq_id0}/action", json={"action": "reject"})
     rv = read_json(REPO / "validation" / "rejected" / "smoke" / f"{eq_id0}.json")
-    check(r.status_code == 200 and rv.get("order") == 1.5,
-          "rejected JSON carries the order too (flip back for the editor flow)")
+    check(r.status_code == 200 and rv.get("order") == 3,
+          "rejected JSON carries the item's position too (flip back for the editor flow)")
     fresh = appmod.parse_document(md_path.read_text(), doc_id)
     check(next(i for i in fresh[0]["items"] if i["id"] == eq_id0)["order"] == 3,
           "fresh parse re-stamps document order (manual edit is doc-JSON only)")
@@ -681,8 +698,10 @@ def main():
     # --- chat message route (answer_turn stubbed) ---
     saved_ans = appmod.orchestrator.answer_turn
     saved_list_kbs = appmod.rag.list_kbs
+    sent_tokens = []
 
-    def fake_answer_turn(user_turn, history, kb_id, max_tokens):
+    def fake_answer_turn(user_turn, history, kb_id, max_tokens=None):
+        sent_tokens.append(max_tokens)
         return f"echo:{user_turn}:{kb_id}", [
             {"kind": "retrieval", "chunks": ["c1", "c2", "c3"]},
             {"kind": "message", "content": user_turn},
@@ -753,6 +772,9 @@ def main():
         check(client.post("/api/chat/sessions/nope/messages",
                           json={"content": "x"}).status_code == 404,
               "message to missing session -> 404")
+        check(all(t is None for t in sent_tokens),
+              "chat route calls answer_turn with no positional max-tokens "
+              "(profile max_tokens resolves inside chat())")
     finally:
         appmod.orchestrator.answer_turn = saved_ans
         appmod.rag.list_kbs = saved_list_kbs
@@ -835,6 +857,84 @@ def main():
         ragmod.VERIFIED_DIR = saved_vdir
         shutil.rmtree(verified_tmp, ignore_errors=True)
 
+    # --- generation profiles: /api/settings round-trip + the model worker
+    # threading a profile context_length into models.load (isolated to a temp
+    # settings.json — the real file is user data) ---
+    saved_spath = appmod.profiles.SETTINGS_PATH
+    tmp_settings = tempfile.mkdtemp(prefix="settings_")
+    appmod.profiles.SETTINGS_PATH = Path(tmp_settings) / "settings.json"
+    saved_m3 = (appmod.models.current_model, appmod.models.unload,
+                appmod.models.load)
+    load_calls = []
+
+    def fake_current3():
+        return None
+
+    def fake_unload3(path, force=True):
+        pass
+
+    def fake_load3(key, variant=None, max_seq_length=None):
+        load_calls.append((key, variant, max_seq_length))
+
+    appmod.models.current_model = fake_current3
+    appmod.models.unload = fake_unload3
+    appmod.models.load = fake_load3
+
+    def wait_job3(jid):
+        # same poll loop as wait_job below (defined later in this file)
+        job = {}
+        for _ in range(100):
+            job = client.get(f"/jobs/{jid}").get_json()
+            if job["status"] != "running":
+                break
+            time.sleep(0.05)
+        return job
+
+    try:
+        r = client.get("/api/settings")
+        check(r.status_code == 200
+              and r.get_json() == {"global": {}, "models": {}},
+              "GET /api/settings empty when no file")
+        r = client.post("/api/settings", json={
+            "global": {"temperature": 0.3, "bogus": 1},
+            "models": {"unsloth/granite-4.1-8b-GGUF": {"top_k": 40,
+                                                         "context_length": 32768}}}).get_json()
+        check(r == {"global": {"temperature": 0.3},
+                     "models": {"unsloth/granite-4.1-8b-GGUF":
+                                 {"top_k": 40, "context_length": 32768}}},
+              "POST /api/settings sanitizes + drops unknown keys")
+        r = client.get("/api/settings")
+        check(r.status_code == 200 and r.get_json()["models"][
+            "unsloth/granite-4.1-8b-GGUF"]["top_k"] == 40,
+              "GET reflects persisted settings")
+        r = client.post("/api/settings",
+                        json={"global": {"temperature": float("nan")}})
+        check(r.status_code == 400, "NaN in settings POST -> 400")
+        r = client.post("/api/settings", json={"global": []})
+        check(r.status_code == 400, "non-object settings -> 400")
+        # the model worker resolves the target's context_length from the
+        # profile and passes it to models.load as max_seq_length
+        client.post("/api/settings", json={
+            "models": {"unsloth/granite-4.1-8b-GGUF": {"context_length": 4096}}})
+        load_calls.clear()
+        r = client.post("/api/model/load",
+                        json={"model": appmod.config.CHAT_MODEL})
+        jid = r.get_json()["job_id"]
+        job = wait_job3(jid)
+        check(job["status"] == "done", "profile context_length load ends done")
+        check(load_calls == [(appmod.config.CHAT_MODEL, None, 4096)],
+              f"profile context_length threaded into models.load ({load_calls})")
+        # empty per-model override = clear (entry dropped, not persisted)
+        client.post("/api/settings", json={
+            "models": {"unsloth/granite-4.1-8b-GGUF": {}}})
+        check(client.get("/api/settings").get_json()["models"] == {},
+              "empty per-model override clears the entry")
+    finally:
+        appmod.profiles.SETTINGS_PATH = saved_spath
+        shutil.rmtree(tmp_settings, ignore_errors=True)
+        (appmod.models.current_model, appmod.models.unload,
+         appmod.models.load) = saved_m3
+
     # --- model routes (models.current_model/unload/load stubbed) ---
     model_state: dict = {"loaded": None}
     model_calls = []
@@ -855,10 +955,12 @@ def main():
         model_calls.append(("unload", path))
         model_jobsteps.append("unload-step:" + _running_step())
 
-    def fake_load(key, variant=None):
+    def fake_load(key, variant=None, max_seq_length=None):
         model_calls.append(("load", key))
         if variant:
             model_calls.append(("load-variant", variant))
+        if max_seq_length is not None:
+            model_calls.append(("load-seq", max_seq_length))
         model_jobsteps.append("load-step:" + _running_step())
 
     def fake_list_models():
@@ -971,7 +1073,7 @@ def main():
         model_state["loaded"] = None
         model_calls.clear()
 
-        def boom_load(key, variant=None):
+        def boom_load(key, variant=None, max_seq_length=None):
             model_calls.append(("load", key))
             raise RuntimeError("boom")
 
@@ -998,6 +1100,9 @@ def main():
     check('<a href="/chat" class="active">Chat</a>' in h
           and 'id="modelSel"' in h and 'id="loadBtn"' in h,
           "/chat renders active Chat tab + model dropdown")
+    check('id="settingsBtn"' in h and 'id="settingsSave"' in h
+          and 'id="g-context_length"' in h and 'id="moSel"' in h,
+          "/chat renders the generation-settings panel (global + per-model)")
     check('https://cdn.jsdelivr.net/npm/marked@15/marked.min.js' in h,
           "/chat includes the marked CDN for markdown rendering")
 

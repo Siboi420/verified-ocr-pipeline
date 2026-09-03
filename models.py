@@ -98,13 +98,15 @@ def unload(model_path, force=True):
     return _api("POST", "/api/inference/unload", body)
 
 
-def load(model, variant=None):
+def load(model, variant=None, max_seq_length=None):
     """POST /api/inference/load for a registered key or a literal path.
     MODELS keys ("ocr"/"chat") resolve to their config-default path; anything
     else is treated as the path itself. `variant` pins the GGUF quant via the
     load endpoint's `gguf_variant` field (falls back to the chat config
-    pin). Returns the parsed response; raises RuntimeError on an API
-    failure."""
+    pin). `max_seq_length` (from the generation profile's context_length)
+    wins over the per-role config default when set; None keeps today's
+    behavior exactly. Returns the parsed response; raises RuntimeError on an
+    API failure."""
     path = MODELS.get(model, model)
     body = {"model_path": path, "force_reload": True}
     variant = variant or (config.CHAT_GGUF_VARIANT
@@ -113,9 +115,11 @@ def load(model, variant=None):
         # the backend defaults this repo to UD-Q4_K_XL (not cached -> slow
         # download); pin the cached quant via its gguf_variant field
         body["gguf_variant"] = variant
-    if path == config.CHAT_MODEL and config.CHAT_MAX_SEQ_LENGTH:
+    if max_seq_length is not None:
+        body["max_seq_length"] = max_seq_length
+    elif path == config.CHAT_MODEL and config.CHAT_MAX_SEQ_LENGTH:
         body["max_seq_length"] = config.CHAT_MAX_SEQ_LENGTH
-    if path == config.MODEL and config.OCR_MAX_SEQ_LENGTH:
+    elif path == config.MODEL and config.OCR_MAX_SEQ_LENGTH:
         body["max_seq_length"] = config.OCR_MAX_SEQ_LENGTH
     return _api("POST", "/api/inference/load", body)
 
@@ -153,6 +157,12 @@ def _selftest():
         # explicit variant wins over the config pin, even for a literal path
         load("some/local/model-GGUF", variant="Q4_K_M")
         assert sent["data"]["gguf_variant"] == "Q4_K_M"
+        # explicit max_seq_length wins over the per-role config default
+        # (the generation profile threads context_length through the app)
+        load("chat", max_seq_length=4096)
+        assert sent["data"]["max_seq_length"] == 4096
+        assert sent["data"]["gguf_variant"] == "UD-Q6_K_XL", \
+            "variant pin still applies when a profile supplies max_seq_length"
         # config-MODEL path still gets its role's length override
         if config.OCR_MAX_SEQ_LENGTH:
             load(config.MODEL)

@@ -119,8 +119,7 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   optional `ocr_pages` form field), `/ocr/<doc_id>` (async job), `/jobs/<id>` (poll,
   live `done`/`total` page counts), `/doc/<id>` (review page),
   `/page/<doc_id>/<n>.png` (rendered, cached), `/item/.../action`, `/item/.../delete`,
-  `/item/.../order` (set manual display order `{order: <finite number>}`,
-  int|float — non-finite/missing -> 400),
+  `/item/.../order` (move item to a 1-based page position `{order: <finite number>}`; the page renumbers to a contiguous 1..n — non-finite/missing -> 400),
   `/bulk`.
   Jobs are an **in-memory dict** — lost on restart. `upload()` validates `ocr_pages`
   (`N`, `N-M`, or comma-separated like `2-3, 4-9`, 1-indexed; invalid -> 400) and
@@ -191,7 +190,8 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   session), `GET/PATCH/DELETE /api/chat/sessions/<sid>` (sid regex-validated;
   PATCH accepts `name` and/or `kb_id` — `null` clears; malformed sid → 404),
   `POST /api/chat/sessions/<sid>/messages` `{content, developer?, kb_id?}` →
-  appends the user turn, runs `orchestrator.answer_turn(content, history, kb_id, 12000)`,
+  appends the user turn, runs `orchestrator.answer_turn(content, history, kb_id)`
+  (no positional max-tokens — the resolved generation profile supplies it),
   persists both turns, returns `{answer, session, trace?}` — the trace key is
   present only when `developer` is truthy (live-only, never persisted); a failed
   turn pops the user message and returns 502, keeping the session retryable.
@@ -203,6 +203,11 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   → `rag.list_kbs()` display name, raw id fallback when the backend is
   unreachable; `kb_id == null` → both `None`, "no KB").
   `kb_id == null` skips retrieval (bare tools only).
+  Generation profiles: `GET /api/settings` → the stored `settings.json`
+  (`{"global": {}, "models": {}}` when missing/corrupt, never a 500); `POST
+  /api/settings` sanitizes + persists via `profiles.save_settings` and returns
+  the clean shape (bad values — NaN/Inf/garbage/non-object sections → 400).
+  `MAX_CHAT_TOKENS` is gone (moved into `profiles.DEFAULTS`).
   KB routes: `GET /api/kb` (list via `rag.list_kbs`, 502 on backend RuntimeError),
   `POST /api/kb` (create, 400 empty name), `PATCH/DELETE /api/kb/<kb_id>`
   (rename/delete; id regex-validated), `POST /api/kb/<kb_id>/upload` `{doc_id}`
@@ -234,7 +239,10 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   display name if known, else `Path(path).name`), polled via `/jobs/<id>`. The
   worker ALWAYS calls `models.unload(current_path)` (raw loaded path; no-op
   when nothing loaded) before `models.load(path, variant)` — unload-before-load is the
-  single-model invariant. Verified live 2026-09-03 against :8888.
+  single-model invariant. The worker also resolves the target's profile
+  `context_length` and passes it as `max_seq_length` to `models.load`
+  (`None` = keep the per-role config default — chat 32768 / OCR None).
+  Verified live 2026-09-03 against :8888.
 - `rag_uploader.py` — reads `validation/verified/<doc_id>/*.json` (one folder per
   doc), groups items by
   `doc_id`, renders one markdown file per source doc (`source_name` header, per-item
@@ -266,7 +274,7 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   page's last section (continuation fragments like "where …"/"Notes: …"
   across page boundaries), and true orphans sort to the page tail; bold-marker
   statement titles also get their number via `_stmt_key`. Items
-  order by `order` when present (manual/document number — floats allowed),
+  order by `order` when present (integer 1-based position),
   else by the numeric index of `item_id` (lexical sort put i10
   before i2)
   and uploads to an Unsloth Studio RAG KB (`/api/rag/knowledge-bases`, name via
@@ -292,6 +300,28 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   guards both the unbracketed and braced-subscript (two-way) paths.
   Deliberately deferred: preserving `^` or adding a `*` separator (re-add
   only if the re-test still drops a λ).
+- `profiles.py` — generation settings store (stdlib only): one **global**
+  default profile plus **per-model** overrides, persisted in `BASE/settings.json`
+  (gitignored, `SETTINGS_PATH` module global so tests redirect it).
+  `DEFAULTS` = built-ins: `temperature 0.2`, `repeat_penalty 1.1`,
+  `max_tokens 12000`; `top_k`/`top_p`/`min_p`/`context_length` default `None`
+  (unset = inherit; per-request params resolving to None are OMITTED from the
+  `/v1/chat/completions` payload so sampling params stay off unless set;
+  `context_length` is **load-time only** — the model worker threads it into
+  `models.load(max_seq_length=…)` and it applies on the next load, never a
+  request param). Resolution order: `DEFAULTS <- global <- models[key]`.
+  `load_settings()` returns `{}` on missing/corrupt file (fall back to
+  defaults, never raise); `save_settings()` = sanitize + persist; `sanitize()`
+  coerces numeric strings, drops unknown keys, treats `''`/null as unset
+  (dropped), rejects NaN/Inf/garbage with `ValueError` (→ 400 via the routes),
+  and drops empty per-model entries (that's the "clear override" action).
+  Model matching: exact key, or a key's base name (trailing `-GGUF` stripped)
+  inside the model path — a resolved snapshot path like
+  `granite-4.1-8b-UD-Q6_K_XL.gguf` matches the repo-id key
+  `unsloth/granite-4.1-8b-GGUF` (same suffix approach as the model bar).
+  `--selftest` covers defaults/global/per-model override + snapshot-path
+  matching + sanitize (incl. NaN/Inf/garbage rejection). Chat generation
+  params only; RAG retrieval `top_k=3` and oCR sampling are untouched.
 - `models.py` — model management for Unsloth (stdlib urllib, `_api` raises
   RuntimeError → Flask maps to JSON 502; `--selftest` offline). `MODELS =
   {"ocr": config.MODEL, "chat": config.CHAT_MODEL}` is the default-role mapping,
@@ -307,11 +337,14 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   are separately selectable; `unload(model_path, force=True)` posts to
   `/api/inference/unload` with `force_cancel_active:true` (kills
   non-cancellable in-flight generations; unknown/None path is a harmless no-op
-  — verified live); `load(model, variant=None)` accepts a `MODELS` key
+  — verified live); `load(model, variant=None, max_seq_length=None)` accepts a
+  `MODELS` key
   ("ocr"/"chat" -> its config path) or a literal path, posts `{model_path,
   force_reload:true, gguf_variant?, max_seq_length?}` — `variant` pins the
   quant via `gguf_variant` (falls back to `config.CHAT_GGUF_VARIANT` for the
-  chat default), and `max_seq_length` is sent ONLY when the path equals the
+  chat default), and `max_seq_length` comes from an explicit arg (the
+  profile's `context_length`, threaded by the app worker) or, when `None`,
+  the per-role config default: sent ONLY when the path equals the
   chat/ocr config default; other paths get the backend default — then polls
   status (~2s, up to 120s) until the target reports loaded — the backend may
   resolve a hub id to a local snapshot path, so readiness matches by GGUF
@@ -341,8 +374,14 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   ordered `{"kind":...}` steps: `reasoning` whenever the backend emits
   `reasoning_content`, `message`, `tool_call` (name + raw args), `tool_result`
   (wrapper result or `{error}`), final `answer`); `answer_turn(user_turn, history,
-  kb_id, max_tokens)` → `(answer, trace)` with a `retrieval` step prepended when
-  `kb_id` is set (`None` → no retrieval); `answer_question` (CLI) resolves
+  kb_id, max_tokens=None)` → `(answer, trace)` with a `retrieval` step prepended when
+  `kb_id` is set (`None` → no retrieval; `max_tokens=None` → the resolved
+  profile's cap, applied in `chat()`); `chat(messages, tools, max_tokens=None)`
+  resolves the loaded model's generation profile once via
+  `profiles.resolve(_loaded_model())` and sends `temperature`, `repeat_penalty`,
+  and any set `top_k`/`top_p`/`min_p` (None params omitted from the payload);
+  the `TEMPERATURE` constant is gone (moved into `profiles.DEFAULTS`);
+  `answer_question` (CLI) resolves
   `DEFAULT_KB_NAME = "Verified OCR"` by NAME at runtime (`default_kb_id()`, creates
   if missing) so rename/delete of KBs never strands the CLI on a stale id.
   Retrieves `top_k=3` hybrid chunks via `POST /api/rag/search` (`text` field),
@@ -352,12 +391,26 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   `{"error": …}` back to the model, never crash the loop; final non-tool message
   is the answer, exit 0; iteration cap → exit 1. Tool-call parsing handles both
   the native `message.tool_calls` shape and a `<tool_call>`-marker fallback
-  (verified native-only 2026-09-02). System prompt is the
+  (verified native-only 2026-09-02). **Repetition guard (2026-09-03):** the
+  final answer passes through `_truncate_repetition` — a run of ≥5 identical
+  non-trivial lines (≥40 chars) is cut at the first repeat and replaced with a
+  truncation note, so the 8B-model degenerate-loop failure (seen in session
+  c1f3db7e07a0: 343 identical `≈ 0.75 × 0.17 × 5.477 × 1{,}030{,}400` lines
+  burning the whole token budget) never reaches the UI/session. **Repetition fix
+  (2026-09-03):** the chat payload carries `repeat_penalty: 1.1` (verified
+  accepted live against :8888 — HTTP 200, no unknown-param rejection; the
+  fallback would have been `frequency_penalty: 0.5`), and the system prompt
+  gained two routing lines: re-run the tool with the same inputs when the user
+  asks to break down/explain/verify a previous tool result (never recompute from
+  memory), and "Ast" / "minimum shear reinforcement" / "minimum stirrup area"
+  all mean Av,min → answer with the `min_shear_reinf` tool. `_truncate_repetition`
+  stays as the safety net. System prompt is the
   `docs/infrastructure.md` guardrails (no arithmetic from memory, cite sources,
   flag uncertainty) plus a b×h note (sections like "200x300" are b×h — capacity
   tools take d, or h with `cover_cg`, never total height h as d). `--selftest` is
   offline: tool-load, native + marker extraction, `_norm_args`, round-trip
-  shapes, and a `run_loop` trace-shape assert with `chat()` stubbed.
+  shapes, a `run_loop` trace-shape assert with `chat()` stubbed, and a chat
+  payload-shape assert (stubbed `_api` → `repeat_penalty == 1.1`).
 - `config.py` — `API_BASE` (default `http://localhost:8888`), `API_KEY` (env-only),
   `MODEL = "ggml-org/GLM-OCR-GGUF"` (OCR), `CHAT_MODEL =
   "unsloth/granite-4.1-8b-GGUF"` (chat), `CHAT_GGUF_VARIANT =
@@ -390,8 +443,8 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   sort — `_parse_page_body`'s kind/line sequence), and display/export sort
   by `order`; the type-priority sort (equation → table → text-math → text)
   survives only as the invisible deterministic id-assignment mechanism so
-  ids stay stable across merges/status restores. `order` is `int|float`
-  (floats allow inserting between numbered items).
+  ids stay stable across merges/status restores. `order` is an int (1-based;
+  the reorder route renumbers the whole page to 1..n on manual edits).
   Every item carries `chapter`/`section` (nearest preceding `CHAPTER N` / dotted
   heading, `R21.2.1` kept, both reset per page; line-start anchored so inline
   refs/decimals never match; GLM-OCR bolds provision markers
@@ -449,8 +502,10 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   `sortItems()` first, which re-sorts each page by `order` (missing order →
   Infinity, so legacy items keep their array order after ordered ones — stable
   sort). Each item gets a small editable **order number** input (`.order`, in
-  the action row); editing it posts `{order}` to `/item/<doc_id>/<item_id>/order`
-  and re-renders in the new order (floats insert between existing orders).
+  the action row; `type=number`, min 1, max = the page's item count); a
+  `change` posts `{order}` to `/item/<doc_id>/<item_id>/order` and re-renders:
+  the server moves the item to that 1-based position and renumbers the whole
+  page 1..n (other pages untouched).
   An "OCR'd pages only" checkbox (`onlyOcr`) restricts `#pageSel` and prev/next to
   pages in `DOC.pages` (pages with ≥1 item; falls back to all pages when there are
   none), via `navPages()` (filtered list or full 1..n) and `stepPage(dir)` (steps the
@@ -527,12 +582,23 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   `<pre>` (escaped monospace, no MathJax/markdown) with rows for retrieval
   chunks / reasoning / messages / tool calls+results. Traces are live, never
   persisted; sessions render from the server's JSON.
+  **⚙ Settings panel** (below the KB row, `#settingsBtn` toggles
+  `#settingsPanel`; chat page only): a **Global** fieldset with the 7
+  generation params (`temperature`/`top_k`/`top_p`/`min_p`/`repeat_penalty`/
+  `max_tokens`/`context_length`) plus a **per-model override** fieldset (a
+  model `<select>` filled from `GET /api/model` `available`, de-duped by path
+  since quants repeat the repo id; same 7 fields; **clear override** empties
+  the fields and saves — an all-empty entry is dropped server-side). Empty
+  input = unset/inherit; a note reads "context_length applies on next model
+  load". Save posts the full shape to `/api/settings` and toasts on success;
+  on open the panel refreshes both settings and the installed-model list from
+  the server.
 - `validation/` — `pending/` (docs), `verified/<doc_id>/`, `rejected/<doc_id>/` (per-item JSON), `uploads/<doc_id>/` (pdf, md, page PNGs).
 - `functions/beam_calc.py` — self-contained, **stdlib-only** (math; numpy/matplotlib/argparse/yaml dropped) ACI 318M-19 beam shear/flexure calcs extracted from the BeamValidation repo
   (github.com/Siboi420/BeamValidation, commit `668be3670dc8ba065f215a0ca1b59eb9e3bd8ca5`, `scripts/RCBeam_moment_capacity.py`). Public: `min_shear_reinf(b_w, f_c, f_yt)` → Av,min per metre (mm²/m, §9.6.3.3, `max(0.062·√f'c·b_w/f_yt, 0.35·b_w/f_yt)·1000`); `shear_capacity(b, d=None, f_c=None, A_v=0, s=0, f_yw=0, A_s=None, V_u=None, M_u=None, h=None, cover_cg=None)` → wrapped `compute_aci_shear` — effective depth is **d, or h with cover_cg (d = h − cover_cg), never both (loud XOR ValueError), rejected cover_cg ≥ h**, Vc rows: simplified `§22.5.5.1(a)`; detailed `(b)` only when stirrups ≥ Av,min AND A_s+V_u+M_u given, capped `§22.5.8.5.3`-adjacent `0.29·λ·√f'c·b·d`; **size-effect `(c)` when stirrups < Av,min (or absent) and A_s given: `λ_s = min(√(2/(1+d/250)), 1)` (§22.5.5.1.3), `V_c = 0.66·λ_s·λ·ρ_w^⅓·√f'c·b·d`**; Av,min comparison via `min_shear_reinf(b, f_c, f_yw)·s/1000` (reused, not duplicated); stirrups adequate ⇔ that inequality; φ_v=0.75; returns `Vc_criterion` ("row (a)"|"row (b)"|"row (c)") + `lambda_s` on top of the numeric keys; `flex_capacity(b, d=None, A_s=None, f_c=None, f_yl=None, h=None, cover_cg=None)` → wrapped `compute_aci_flexure` (stress block §22.2.2.1, β₁ §22.2.2.4.3, φ Table 21.2.2), same d/h XOR path. Constants EPSILON_CU=0.003, Es=2e5, λ=1.0.
 - `functions/wrapper.py` — schema-driven dispatcher (`call_tool(name, **kwargs)` → `{value, unit, basis}`; registry maps the 3 tool names; loads the matching `schemas/<name>.json` resolved via `__file__`; validates required fields, unknown keys, numeric type/finiteness, exclusiveMinimum/minimum bounds; raises `ValueError` with a clear message). Schema read/parse errors (missing file, bad JSON) are wrapped as `ValueError`.
 - `functions/test_shear_tools.py` — plain asserts + PASS/FAIL (no framework), 19 checks over all three tools + wrapper shape/unit/basis + d/h resolution + validation error paths (missing/negative/non-numeric/unknown-key/unknown-tool); exits non-zero on failure. Loads sibling modules via `importlib` so it runs from any cwd.
-- `schemas/min_shear_reinf.json`, `schemas/shear_capacity.json`, `schemas/flex_capacity.json` — OpenAI function-calling shape (`name`/`description`/`parameters` with `type`/`properties`/`required`/`additionalProperties:false`) plus an `output` block carrying `unit` + `basis` (returned by wrapper). `d` is **optional** on the two capacity schemas (default null); `h` + `cover_cg` are optional fields resolving to d; capacity `description`s carry the few-shot line ("a 200x300 beam → pass b=200 and (d, or h=300 with cover_cg)"), `min_shear_reinf`'s a b_w-only variant; `shear_capacity` `basis` names row (c) + §22.5.5.1.3 λ_s.
+- `schemas/min_shear_reinf.json`, `schemas/shear_capacity.json`, `schemas/flex_capacity.json` — OpenAI function-calling shape (`name`/`description`/`parameters` with `type`/`properties`/`required`/`additionalProperties:false`) plus an `output` block carrying `unit` + `basis` (returned by wrapper). `d` is **optional** on the two capacity schemas (default null); `h` + `cover_cg` are optional fields resolving to d; capacity `description`s carry the few-shot line ("a 200x300 beam → pass b=200 and (d, or h=300 with cover_cg)"), `min_shear_reinf`'s a b_w-only variant and its `description` advertises the "minimum Ast" / "minimum shear reinforcement" / "minimum stirrup area" aliases (Av,min) so the model routes those phrasings to it; `shear_capacity` `basis` names row (c) + §22.5.5.1.3 λ_s.
 
 ## Current state (verified facts — don't contradict)
 
@@ -618,20 +684,40 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   registry lists empty/half-installed repos with no weights and is NOT
   consulted; `mmproj-*` skipped; verified live 2026-09-03 — sam3/gemma/qwen
   stubs deleted, remaining: granite-4.1-8b (UD-Q6_K_XL), GLM-OCR (Q8_0),
-  GLM-OCR (f16)), and
-  `POST /api/model/load`
   takes a literal model path (+ optional `variant` from the dropdown) with
   variant-aware "already loaded" matching.
-  Smoke test now 219 checks.
+  Smoke test now 233 checks.
+- **Generation profiles (implemented 2026-09-15):** a global default profile
+  + per-model overrides in `BASE/settings.json` (gitignored), applied to
+  every chat session automatically via `profiles.resolve` — built-ins
+  (`temperature 0.2`, `repeat_penalty 1.1`, `max_tokens 12000`) <- global <-
+  per-model. Sampling params resolving to None are omitted from the
+  `/v1/chat/completions` payload; `context_length` is load-time only
+  (threaded into `models.load(max_seq_length=…)` by the model worker, takes
+  effect on the next load). `/api/settings` GET/POST persists the file
+  (NaN/Inf/garbage -> 400); the chat page's ⚙ Settings panel edits both
+  sections. `TEMPERATURE`/`MAX_CHAT_TOKENS` are gone (moved into
+  `profiles.DEFAULTS`); `ocr_engine` sampling and RAG retrieval `top_k` are
+  untouched.
 - **Manual item ordering (implemented 2026-09-03):** every item carries
   `order` — document position by default, editable per page via `POST
-  /item/<doc_id>/<item_id>/order` `{order: <int|float>}` (floats insert
-  between existing orders; non-finite/missing -> 400). The review page and
+  /item/<doc_id>/<item_id>/order` `{order: <finite number>}` (rounded to
+  nearest int, clamped to 1..n, the moved item goes to that position and the
+  page renumbers 1..n; non-finite/missing -> 400). The review page and
   KB exports (`rag_uploader._item_order` prefers `order`) sort by it; the
   type-priority sort survives only as id assignment, so ids/merge-restore
   are unchanged. Drawn-box items get page-tail orders. `doc_view` runs
   `_ensure_order` once per legacy doc (`_order_stamped` marker) so existing
   docs get document order without losing review state.
+- **Chat repetition loop + "minimum Ast" routing (fixed 2026-09-03):** the
+  8B-model degenerate repeated-line loop (session c1f3db7e07a0) is addressed at
+  the sampling level (`repeat_penalty: 1.1` on the chat payload, verified
+  accepted live) plus prompt routing (re-run the tool on "break down" asks;
+  "Ast" → `min_shear_reinf`). Live-verified: "what is the minimum Ast for
+  b_w=350, f_c=28, f_yt=420?" calls `min_shear_reinf` with those exact args and
+  answers 291.7 mm²/m. `_truncate_repetition` remains as the safety net. No new
+  tool (the `min_flex_steel` idea was dropped — YAGNI; `min_shear_reinf` covers
+  it); tool count stays 3.
 - **Voice / AIRI roadmap (later):** docs-only this round (`docs/voice-roadmap.md`);
   no voice code or new deps. Target: browser mic → STT → chat session store →
   `orchestrator.answer_turn` → TTS → playback, with planned `POST /api/voice/stt`
@@ -648,6 +734,12 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   dict is seeded with `unloading <name>`, but the worker may already be past it
   by the time you poll — assert on the final state + captured steps, never on a
   mid-flight poll. Tests capture the step INSIDE the stubbed unload/load.
+- **`settings.json` is user data**: the smoke test and selftests redirect
+  `profiles.SETTINGS_PATH` to a temp file — never let a route/selftest write
+  the machine's real settings. Editing `context_length` changes only the NEXT
+  model load (the backend is single-model; a resident model keeps its loaded
+  context), and an editing-only change to sampling params applies immediately
+  to subsequent chat turns.
 - **Granite GGUF download is the user's step**: `models.load("chat")` posts to
   the backend and polls up to 120s; if granite isn't downloaded yet the load
   stalls/errors on the hub side — that's outside our code.
@@ -668,12 +760,15 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   parsing (before DOM insertion) is what keeps MathJax math intact; NUL can't
   occur in real content. The trace `<pre>` and error paths bypass the pipeline
   on purpose (plain text only).
-- **The `model` field orchestrator/OCR send is ignored by llama-server**:
-  `orchestrator.chat()` and `ocr_engine` keep sending the config-default model
-  name; the backend answers with the *loaded* model (single-model server),
-  which is exactly what the app manages via unload-before-load. Assumption
-  as of 2026-09-03; if the backend ever rejects a mismatched `model`, switch
-  those payloads to `models.current_model()`.
+- **The backend now ENFORCES the `model` field (verified live 2026-09-03)**: with
+  "Switch model by request" off, `/v1/chat/completions` rejects any model name
+  other than the currently-loaded one (HTTP 404 `model_not_found`) — the old
+  "field ignored, backend answers with the loaded model" assumption is dead.
+  `orchestrator.chat()` and `ocr_engine` both send the loaded model via a local
+  `_loaded_model()` helper (`models.current_model()`, falling back to the
+  config default when the status query fails or nothing is loaded), so chat/OCR
+  follow whatever the model bar loaded — granite, LFM2.5, or GLM-OCR all work
+  without the 404 mismatch.*
 - **App respawns**: don't assume a `kill`/`pkill` sticks — verify with `curl`.
 - **WSL GPU**: `/dev/dxg` is the paravirtualized path; `nvidia-smi` works via
   `/usr/lib/wsl/lib/nvidia-smi`. Unsloth's `POST /api/llama/backend` is the supported
@@ -685,7 +780,7 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
 
 - `python3 test_itemizer.py` — 73 itemizer assertions.
 - `python3 functions/test_shear_tools.py` — 19 hand-calc checks for the `functions/` shear/flexure tools (Av,min mm²/m, simplified Vc, row (c) size-effect Vc incl. λ_s + ρ_w, adequate-stirrup rows (a)/(b), partial stirrups → row (c) + V_s, d↔h/cover_cg equivalence for shear and flex, d-resolution errors (XOR/neither/cover≥h), row (a) fallback, wrapper shape + unit/basis incl. h-path, validation error paths); plain asserts + PASS/FAIL, exit non-zero on failure.
-- `python3 smoke_test.py` — 219 end-to-end checks via Flask test client (no live OCR,
+- `python3 smoke_test.py` — 233 end-to-end checks via Flask test client (no live OCR,
   no backend; `rag_uploader._api`, `models.current_model/unload/load/list_models`,
   and `orchestrator.answer_turn` stubbed where they'd hit :8888):
   the original 132 assert `?ocr=1` redirect, no-key OCR error,
@@ -721,26 +816,51 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   different-quant proceeds), load error -> `error` propagated),
   and shared-header renders on both pages (active tab + model `#modelSel`
   dropdown + `#loadBtn`; `/chat` also carries the marked CDN script).
-  the new 22 add manual ordering: `POST /item/.../order` sets/persists order and
-  reorders the page (missing/non-numeric/NaN/inf -> 400, unknown item -> 404),
+  the new 22 add manual ordering: `POST /item/.../order` moves an item to a
+  1-based position and renumbers its page to contiguous 1..n (moved item
+  holds the target, the old position-1 holder shifts to 2; 99 clamps to the
+  tail, 0 -> 1, 2.7 rounds to 3; missing/non-numeric/NaN/inf -> 400, unknown
+  item -> 404),
   `order` carried into accepted+rejected JSON payloads, a fresh `parse_document`
   re-stamps document order, `_ensure_order` on a legacy doc (stamp marker,
   every item stamped, no resurrection of a deleted item, bbox item tails the
   page, review status/edited content preserved), and `merge_pages_into_doc`
   preserving a manually-edited `order`; bbox helpers assign order.
+  the new 10 (223 -> 233) add generation profiles: `GET /api/settings` empty
+  when no file, `POST` sanitize + unknown-key drop + persist round-trip,
+  NaN -> 400, non-object global -> 400, the model worker threading a profile
+  `context_length` into `models.load(..., max_seq_length=4096)`, empty
+  per-model override clearing the entry, the chat route calling
+  `answer_turn` with no positional max-tokens, and `/chat` rendering the
+  settings panel (global + per-model fieldsets).
+- `python3 profiles.py --selftest` — offline: defaults/global/per-model
+  resolution (per-model beats global beats built-ins), resolved-snapshot-path
+  matching against a repo-id key (base name, `-GGUF` stripped), sanitize
+  (numeric-string coercion, unknown-key drop, empty/null -> dropped,
+  NaN/Inf/garbage/fractional-int -> ValueError, empty per-model entry dropped,
+  non-object sections rejected), and corrupt-file -> defaults never raise.
 - `python3 orchestrator.py --selftest` — offline PASS: schema glob yields exactly
   the 3 tool names in the right shape, tool-call extraction parses both synthetic
   native `tool_calls` and `<tool_call>`-marker payloads, round-trip/`_norm_args`
   shapes, and a `run_loop` trace-shape assert with `chat()` stubbed (expected
   step kinds/order `reasoning, message, tool_call, tool_result, reasoning,
-  message, answer`, real wrapper call value 291.67). No HTTP-handler block — the
-  server is gone.
+  message, answer`, real wrapper call value 291.67) plus `_truncate_repetition`
+  checks (8× repeated 60-char line truncated to prefix + note; clean text,
+  short lines, and 3× repeats pass through untouched) and two chat-payload
+  asserts with `_api` + `profiles.load_settings` stubbed (defaults:
+  `temperature 0.2`, `repeat_penalty 1.1`, `max_tokens 12000`, no
+  top_k/top_p/min_p keys when unset; override: global `temperature 0.7` +
+  `top_k 33` and per-model `min_p 0.05` flow into the payload, unset
+  `repeat_penalty` keeps the default, `None` max_tokens -> profile default).
+  No HTTP-handler block — the server is gone.
 - `python3 rag_uploader.py --selftest` — offline grouping/ordering/Unicode/empty-skip
   checks (unchanged but now with `_api` raising RuntimeError).
 - `python3 models.py --selftest` — offline: `MODELS` wiring + `load("chat")`
   payload shape (`model_path`/`force_reload`/`max_seq_length=32768`,
   `gguf_variant` present for the chat default; explicit `variant` on a
-  literal path wins over the config pin), literal
+  literal path wins over the config pin; explicit `max_seq_length=4096` on
+  a chat load wins over the 32768 config default while the variant pin
+  still applies), literal
   path `load("some/local/model-GGUF")` posts that path with no
   `max_seq_length`/`gguf_variant`, and `list_models()` hits `GET
   /api/models/cached-gguf` and emits one entry per installed quant parsed

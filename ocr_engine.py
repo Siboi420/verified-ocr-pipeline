@@ -24,6 +24,18 @@ import requests
 
 from config import API_BASE, API_KEY, MODEL
 
+import models  # noqa: E402 — sibling module, same pattern as config
+
+
+def _loaded_model():
+    """The model the backend currently has loaded (it rejects any other name
+    in the payload — "Switch model by request" is off). Falls back to the
+    config default when the status query fails or nothing is loaded."""
+    try:
+        return models.current_model() or MODEL
+    except RuntimeError:
+        return MODEL
+
 OCR_PROMPT = (
     "Extract all text, tables, and numbers from this document page as clean markdown. "
     "Preserve all numerical values exactly. "
@@ -188,7 +200,7 @@ def ocr_page(image_path, page_num=None, max_tokens=4096, prompt=OCR_PROMPT):
     label = f"page {page_num}" if page_num else Path(image_path).name
 
     payload = {
-        "model": MODEL,
+        "model": _loaded_model(),
         "messages": [
             {
                 "role": "user",

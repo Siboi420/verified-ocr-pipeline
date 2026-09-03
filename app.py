@@ -17,6 +17,7 @@ from flask import Flask, abort, jsonify, redirect, render_template, request, sen
 import config
 import models  # pyright: ignore[reportMissingImports] — same-dir module
 import orchestrator  # pyright: ignore[reportMissingImports] — same-dir module
+import profiles  # pyright: ignore[reportMissingImports] — same-dir module
 import rag_uploader as rag  # pyright: ignore[reportMissingImports] — same-dir module
 from itemizer import INLINE_MATH_RE, clean_export_text, eq_refs, parse_document, parse_table_caption, pick_caption_from_band, unwrap_html_caption  # pyright: ignore[reportMissingImports] — same-dir module
 from ocr_engine import CAPTION_BAND_PROMPT, EQUATION_PROMPT, OCR_PROMPT, assemble_markdown, ocr_batch, ocr_page, parse_page_ranges, pdf_to_images, tesseract_ocr
@@ -35,7 +36,6 @@ for d in (PENDING_DIR, VERIFIED_DIR, REJECTED_DIR, UPLOADS):
 
 SESSIONS_DIR = BASE / "sessions"  # gitignored; one JSON file per chat session
 SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
-MAX_CHAT_TOKENS = 12000  # ponytail: fixed cap, revisit if a legit answer truncates
 
 app = Flask(__name__)
 
@@ -809,7 +809,7 @@ def _ensure_order(doc):
 
 @app.route("/item/<doc_id>/<item_id>/order", methods=["POST"])
 def item_order(doc_id, item_id):
-    """Set an item's manual display order (int|float; floats insert between)."""
+    """Move an item to a 1-based position on its page; the page renumbers."""
     if (
         not re.fullmatch(r"[A-Za-z0-9._-]+", doc_id)
         or not re.fullmatch(r"[A-Za-z0-9._-]+", item_id)
@@ -825,13 +825,28 @@ def item_order(doc_id, item_id):
         abort(400, "order must be a finite number")
     if not math.isfinite(order):
         abort(400, "order must be a finite number")
-    item = next(
-        (it for pg in doc.get("pages", []) for it in pg["items"] if it["id"] == item_id),
+    page = next(
+        (pg for pg in doc.get("pages", []) for it in pg.get("items", []) if it["id"] == item_id),
         None,
     )
-    if item is None:
+    if page is None:
         abort(404, f"item {item_id} not found")
-    item["order"] = order
+    items = page["items"]
+    n = len(items)
+    target = round(order)  # finite float (checked above) -> always an int
+    target = 1 if target < 1 else (n if target > n else target)
+    # stable sort: missing order falls back to Infinity so legacy stragglers
+    # sort to the tail (original array index breaks ties), then renumber 1..n
+    srt = sorted(
+        items,
+        key=lambda it: it.get("order") if it.get("order") is not None else math.inf,
+    )
+    idx = next(i for i, it in enumerate(srt) if it["id"] == item_id)
+    moved = srt.pop(idx)
+    srt.insert(target - 1, moved)
+    for k, it in enumerate(srt, 1):
+        it["order"] = k
+    items[:] = srt
     save_doc(doc)
     return jsonify({"ok": True, "doc": doc})
 
@@ -1014,7 +1029,7 @@ def chat_message(sid):
     s["messages"].append({"role": "user", "content": content, "ts": now})
     try:
         answer, trace = orchestrator.answer_turn(
-            content, s["messages"][:-1], s.get("kb_id"), MAX_CHAT_TOKENS)
+            content, s["messages"][:-1], s.get("kb_id"))
     except RuntimeError as e:
         s["messages"].pop()  # failed turn: keep the session retryable, don't persist it
         return jsonify({"error": str(e)}), 502
@@ -1026,6 +1041,24 @@ def chat_message(sid):
     if developer:
         resp["trace"] = trace  # dev mode only: trace is live, never persisted
     return jsonify(resp)
+
+
+# --- generation profiles (global + per-model), persisted in settings.json ---
+
+
+@app.route("/api/settings")
+def settings_get():
+    return jsonify(profiles.load_settings() or {"global": {}, "models": {}})
+
+
+@app.route("/api/settings", methods=["POST"])
+def settings_post():
+    data = request.get_json(silent=True) or {}
+    try:
+        clean = profiles.save_settings(data)  # sanitize + persist
+    except ValueError as e:
+        abort(400, str(e))
+    return jsonify(clean)
 
 
 # --- Unsloth RAG knowledge-base management ---
@@ -1197,13 +1230,15 @@ def _model_job(job_id, path, current_path, variant=None):
     Unload ALWAYS precedes load (the backend is single-model; load would
     refuse or evict mid-flight otherwise). force_cancel_active kills
     non-cancellable in-flight generations (ocr_engine sends non-streaming
-    calls)."""
+    calls). The resolved profile's context_length threads into models.load
+    as max_seq_length (None -> the per-role config default)."""
     global MODEL_JOB_ID
     try:
         JOBS[job_id]["step"] = f"unloading {_model_label(current_path) if current_path else 'resident'}"
         models.unload(current_path or None)  # no-op when nothing loaded
         JOBS[job_id]["step"] = f"loading {_model_label(path)}"
-        models.load(path, variant=variant)
+        ctx = profiles.resolve(path).get("context_length")
+        models.load(path, variant=variant, max_seq_length=ctx)
         JOBS[job_id].update(status="done", step=f"loaded {_model_label(path)}")
     except Exception as e:
         JOBS[job_id] = {"status": "error", "error": str(e)}

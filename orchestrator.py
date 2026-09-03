@@ -30,12 +30,26 @@ wrapper = importlib.import_module("wrapper")
 
 import config  # noqa: E402 — after the sys.path juggling
 
+import models  # noqa: E402 — sibling module, same pattern
+
+import profiles  # noqa: E402 — sibling module, same pattern; pyright: ignore[reportMissingImports]
+
 API_BASE = os.environ.get("UNSLOTH_API_BASE", config.API_BASE)
 MODEL = config.CHAT_MODEL
+
+
+def _loaded_model():
+    """The model the backend currently has loaded (it rejects any other name
+    in the payload — "Switch model by request" is off). Falls back to the
+    config default when the status query fails or nothing is loaded."""
+    try:
+        return models.current_model() or MODEL
+    except RuntimeError:
+        return MODEL
+
 DEFAULT_KB_NAME = "Verified OCR"  # resolved by name at runtime (KBs can be renamed/deleted)
 TOP_K = 3
 MAX_ITERS = 8
-TEMPERATURE = 0.2
 # Cap output so a reasoning model can't spend the whole window on
 # chain-of-thought and stop with an empty reply. Real answers need ~1-2k;
 # 12000 leaves headroom while bounding worst-case CoT.  # ponytail: fixed cap,
@@ -52,7 +66,11 @@ SYSTEM_PROMPT = (
     "are b x h. Capacity tools take effective depth d, or h plus `cover_cg` "
     "(d = h - cover_cg); never pass total height h as d. After the tool calls "
     "return their results, answer the user directly with the final value and its "
-    "basis - do not include a chain-of-thought / reasoning preamble."
+    "basis - do not include a chain-of-thought / reasoning preamble. When the "
+    "user asks to break down, explain, or verify a previous tool result, re-run "
+    "the tool with the same inputs instead of recomputing from memory. 'Ast', "
+    "'minimum shear reinforcement', and 'minimum stirrup area' all mean Av,min - "
+    "answer them with the min_shear_reinf tool."
 )
 
 # Qwen marker-format tool call: <tool_call>{"name": ..., "arguments": {...}}</tool_call>
@@ -173,14 +191,45 @@ def tool_result(mode, call_id, result):
     return {"role": "tool", "content": f"<tool_response>\n{content}\n</tool_response>"}
 
 
-def chat(messages, tools, max_tokens):
-    return _api("POST", "/v1/chat/completions", {
-        "model": MODEL,
+def chat(messages, tools, max_tokens=None):
+    """One /v1/chat/completions round-trip against the loaded model's
+    generation profile. max_tokens None -> the resolved profile's cap
+    (profiles.DEFAULTS fallback). Sampling params that resolve to None
+    (top_k/top_p/min_p unless set) are omitted from the payload so they
+    stay off."""
+    model = _loaded_model()
+    p = profiles.resolve(model)
+    body = {
+        "model": model,
         "messages": messages,
         "tools": tools,
-        "temperature": TEMPERATURE,
-        "max_tokens": max_tokens,
-    })["choices"][0]["message"]
+        "max_tokens": max_tokens or p["max_tokens"],
+    }
+    for k in ("temperature", "top_k", "top_p", "min_p", "repeat_penalty"):
+        if p[k] is not None:
+            body[k] = p[k]
+    return _api("POST", "/v1/chat/completions", body)["choices"][0]["message"]
+
+
+REPEAT_GUARD_THRESHOLD = 5  # consecutive identical non-trivial lines -> truncate
+REPEAT_LINE_MIN = 40         # ignore short lines (headers, bullet markers)
+REPEAT_TRUNC_NOTE = "\n\n…(output truncated: repeated-line block)"
+
+
+def _truncate_repetition(text):
+    """Cut a degenerate repeated-line block (a known 8B-model failure mode
+    that burns the whole token budget) so it never reaches the UI/session.
+    Keeps the sane prefix before the first run of REPEAT_GUARD_THRESHOLD
+    identical non-trivial lines, appends a truncation note."""
+    lines = text.splitlines()
+    for i in range(len(lines) - REPEAT_GUARD_THRESHOLD + 1):
+        mid = lines[i]
+        if len(mid.strip()) < REPEAT_LINE_MIN:
+            continue
+        if all(lines[i + k] == mid for k in range(REPEAT_GUARD_THRESHOLD)):
+            prefix = "\n".join(lines[:i]).rstrip()
+            return prefix + REPEAT_TRUNC_NOTE if prefix else REPEAT_TRUNC_NOTE
+    return text
 
 
 def run_loop(messages, tools, max_tokens):
@@ -199,14 +248,16 @@ def run_loop(messages, tools, max_tokens):
             mode, calls = extract_tool_calls(message)
         except ValueError as e:  # noqa: B015 — pi-lens-ignore: no-boolean-in-except (false positive: plain single-class except)
             # Malformed tool-call block: tell the model, keep the loop alive.
+            # Note: avoid boolean ops in this body — the ast-grep rule above
+            # scans the whole except subtree incl. the body (stopBy: end).
             messages.append(assistant_payload(message, "marker"))
             messages.append(tool_result("marker", None, {"error": str(e)}))
-            trace.append({"kind": "message", "content": message.get("content") or ""})
+            trace.append({"kind": "message", "content": message.get("content", "")})
             trace.append({"kind": "tool_result", "result": {"error": str(e)}})
             continue
         trace.append({"kind": "message", "content": message.get("content") or ""})
         if not calls:
-            answer = message.get("content") or ""
+            answer = _truncate_repetition(message.get("content") or "")
             trace.append({"kind": "answer", "content": answer})
             return answer, trace
         messages.append(assistant_payload(message, mode))
@@ -222,11 +273,13 @@ def run_loop(messages, tools, max_tokens):
     raise RuntimeError("reached iteration cap without a final answer")
 
 
-def answer_turn(user_turn, history, kb_id, max_tokens):
+def answer_turn(user_turn, history, kb_id, max_tokens=None):
     """One user turn in a session: (retrieval?) + chat loop.
 
     history: prior messages [{"role": "user"|"assistant", "content": …}].
     kb_id: RAG KB to retrieve from; None = no retrieval (bare tools only).
+    max_tokens: explicit cap; None falls back to the resolved profile's
+    max_tokens (set in chat()).
     Returns (answer, trace); the trace's first step (when kb_id is set) is
     {"kind": "retrieval", "chunks": […]}."""
     trace = []
@@ -321,6 +374,70 @@ def selftest():
     tresult = trace[3]
     assert abs(tresult["result"]["value"] - 291.67) < 0.01, tresult  # real wrapper call
     assert trace[-1]["kind"] == "answer" and trace[-1]["content"] == answer
+
+    # chat payload carries the resolved profile (defaults when no settings
+    # on disk; the selftest stubs load_settings so a user's real
+    # settings.json can never break it), plus explicit param keys for every
+    # set value — repeat_penalty verified accepted live 2026-09-03 (HTTP
+    # 200; fallback would be frequency_penalty 0.5)
+    sent = {}
+    saved_api = globals()["_api"]
+    saved_load_settings = profiles.load_settings
+
+    def fake_api(method, path, data=None):
+        sent["data"] = data
+        return {"choices": [{"message": {"content": "ok"}}]}
+
+    globals()["_api"] = fake_api
+    try:
+        profiles.load_settings = lambda: {}
+        chat([{"role": "user", "content": "q"}], load_tools(), 12000)
+    finally:
+        globals()["_api"] = saved_api
+        profiles.load_settings = saved_load_settings
+    # defaults flow into the payload; unset sampling params stay absent
+    d = sent["data"]
+    assert d["temperature"] == 0.2, d
+    assert d["repeat_penalty"] == 1.1, d
+    assert d["max_tokens"] == 12000, d
+    assert "top_k" not in d and "top_p" not in d and "min_p" not in d, \
+        "unset sampling params must be omitted, not sent as null"
+
+    # a profile override flows into the payload
+    sent = {}
+    saved_api = globals()["_api"]
+    saved_load_settings = profiles.load_settings
+
+    def fake_api2(method, path, data=None):
+        sent["data"] = data
+        return {"choices": [{"message": {"content": "ok"}}]}
+
+    globals()["_api"] = fake_api2
+    try:
+        profiles.load_settings = lambda: {
+            "global": {"temperature": 0.7, "top_k": 33},
+            "models": {"unsloth/granite-4.1-8b-GGUF": {"min_p": 0.05}},
+        }
+        chat([{"role": "user", "content": "q"}], load_tools(), None)
+    finally:
+        globals()["_api"] = saved_api
+        profiles.load_settings = saved_load_settings
+    d = sent["data"]
+    assert d["temperature"] == 0.7 and d["top_k"] == 33, d
+    assert d["min_p"] == 0.05, d
+    assert d["repeat_penalty"] == 1.1, "unset repeat_penalty keeps the default"
+    assert d["max_tokens"] == 12000, "None max_tokens -> profile default"
+
+    # repetition guard: a degenerate repeated-line block is truncated
+    # (the 8B-model failure mode that burned the whole token budget in
+    # session c1f3db7e07a0 — 343 identical lines)
+    long_line = "x" * 60
+    repeated = "\n".join([long_line] * 8)
+    out = _truncate_repetition("prefix\n" + repeated)
+    assert out == "prefix" + REPEAT_TRUNC_NOTE, out
+    assert _truncate_repetition("clean text") == "clean text"
+    assert _truncate_repetition("\n".join([long_line] * 3)) == "\n".join([long_line] * 3)
+    assert _truncate_repetition("\n".join(["short"] * 8)) == "\n".join(["short"] * 8)
 
     print("PASS")
 

@@ -52,6 +52,14 @@ window.MathJax = {tex: {inlineMath: [["\\(", "\\)"], ["$", "$"]]}};
   #inputRow { display: flex; gap: 8px; }
   #msgInput { flex: 1; min-height: 44px; resize: vertical; }
   #devToggle { display: flex; align-items: center; gap: 6px; }
+  #settingsPanel { background: #fff; border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px; }
+  #settingsPanel fieldset { border: 1px solid var(--line); border-radius: 6px; margin: 8px 0; }
+  #settingsPanel legend { font-size: 13px; padding: 0 6px; color: var(--muted); }
+  .sflds { display: flex; gap: 10px 14px; flex-wrap: wrap; }
+  .sflds label { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 4px; }
+  .sflds input { width: 90px; }
+  #settingsPanel .note { margin-top: 6px; }
+  #moSel { margin-bottom: 8px; }
   .empty { color: var(--muted); text-align: center; padding: 40px 0; }
   .kbtag { display: block; margin-top: 4px; color: var(--muted); font-size: 12px; }
 </style>
@@ -74,7 +82,38 @@ window.MathJax = {tex: {inlineMath: [["\\(", "\\)"], ["$", "$"]]}};
         <select id="kbSel"><option value="">no KB</option></select>
       </label>
       <label class="muted" id="devToggle"><input type="checkbox" id="devMode"> Developer mode</label>
+      <button id="settingsBtn">⚙ Settings</button>
       <span class="muted" style="margin-left:auto" id="modelHint">pick a model from the top bar</span>
+    </div>
+    <div id="settingsPanel" hidden>
+      <fieldset>
+        <legend>Global — defaults for every model</legend>
+        <div class="sflds">
+          <label>temperature <input type="number" step="any" id="g-temperature"></label>
+          <label>top_k <input type="number" step="1" id="g-top_k"></label>
+          <label>top_p <input type="number" step="any" id="g-top_p"></label>
+          <label>min_p <input type="number" step="any" id="g-min_p"></label>
+          <label>repeat_penalty <input type="number" step="any" id="g-repeat_penalty"></label>
+          <label>max_tokens <input type="number" step="1" id="g-max_tokens"></label>
+          <label>context_length <input type="number" step="1" id="g-context_length"></label>
+        </div>
+        <div class="muted note">empty = unset (inherit); context_length applies on next model load</div>
+      </fieldset>
+      <fieldset>
+        <legend>Override for one model</legend>
+        <select id="moSel"><option value="">choose model…</option></select>
+        <div class="sflds">
+          <label>temperature <input type="number" step="any" id="m-temperature"></label>
+          <label>top_k <input type="number" step="1" id="m-top_k"></label>
+          <label>top_p <input type="number" step="any" id="m-top_p"></label>
+          <label>min_p <input type="number" step="any" id="m-min_p"></label>
+          <label>repeat_penalty <input type="number" step="any" id="m-repeat_penalty"></label>
+          <label>max_tokens <input type="number" step="1" id="m-max_tokens"></label>
+          <label>context_length <input type="number" step="1" id="m-context_length"></label>
+        </div>
+        <button id="moClear">clear override</button>
+      </fieldset>
+      <button id="settingsSave">Save settings</button>
     </div>
     <div id="thread"></div>
     <div id="inputRow">
@@ -301,6 +340,91 @@ $('kbSel').addEventListener('change', () => {
     body: JSON.stringify({kb_id: $('kbSel').value || null})
   }).then(r => r.json()).then(s => { if (s && s.kb_id !== undefined) SESSION.kb_id = s.kb_id; });
 });
+
+// ---- generation profiles: global + per-model overrides (settings.json) ----
+const PARAMS = ['temperature', 'top_k', 'top_p', 'min_p', 'repeat_penalty', 'max_tokens', 'context_length'];
+let settings = {global: {}, models: {}};
+let settingsModels = [];
+
+function numOrUndef(id) {
+  const el = $(id);
+  if (el.value.trim() === '') return undefined;  // unset/inherit
+  const n = el.valueAsNumber;
+  return Number.isFinite(n) ? n : undefined;  // never send NaN/garbage
+}
+function fillFields(prefix, obj) {
+  for (const k of PARAMS)
+    $(prefix + k).value = (obj && obj[k] !== undefined && obj[k] !== null) ? obj[k] : '';
+}
+function readFields(prefix) {
+  const out = {};
+  for (const k of PARAMS) {
+    const v = numOrUndef(prefix + k);
+    if (v !== undefined) out[k] = v;
+  }
+  return out;
+}
+async function loadSettingsPanel() {
+  try { settings = await (await fetch('/api/settings')).json(); }
+  catch (e) { settings = {global: {}, models: {}}; }
+  try {
+    const j = await (await fetch('/api/model')).json();
+    const seen = {};
+    settingsModels = [];
+    for (const m of (j.available || [])) {  // one entry per quant; dedupe by path (repo id)
+      if (!m || !m.path || seen[m.path]) continue;
+      seen[m.path] = 1;
+      settingsModels.push(m);
+    }
+  } catch (e) { settingsModels = []; }
+  const sel = $('moSel');
+  sel.innerHTML = '<option value="">choose model…</option>';
+  for (const m of settingsModels) {
+    const o = document.createElement('option');
+    o.value = m.path; o.textContent = m.name || m.path;
+    sel.appendChild(o);
+  }
+  sel.disabled = !settingsModels.length;
+  $('moClear').disabled = !settingsModels.length;
+  fillFields('g-', settings.global);
+  fillFields('m-', {});
+}
+async function saveSettings() {
+  const key = $('moSel').value;
+  const body = {global: readFields('g-'), models: {}};
+  if (key) {
+    const entry = readFields('m-');
+    // an all-empty override is omitted -> sanitize drops the entry (that's
+    // the "clear override" action)
+    if (Object.keys(entry).length) body.models[key] = entry;
+  }
+  try {
+    const r = await fetch('/api/settings', {method: 'POST',
+      headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+    if (!r.ok) {
+      toast('settings: ' + ((await r.json()).error || r.status), 'error');
+      return;
+    }
+    settings = await r.json();
+    fillFields('g-', settings.global);
+    fillFields('m-', key ? settings.models[key] : {});
+    toast('settings saved', 'done');
+  } catch (e) { toast('settings: ' + e, 'error'); }
+}
+$('settingsBtn').addEventListener('click', async () => {
+  const p = $('settingsPanel');
+  if (p.hidden) { p.hidden = false; await loadSettingsPanel(); }  // refresh from server on open
+  else p.hidden = true;
+});
+$('moSel').addEventListener('change', () => {
+  const key = $('moSel').value;
+  fillFields('m-', key ? (settings.models[key] || {}) : {});
+});
+$('moClear').addEventListener('click', () => {
+  fillFields('m-', {});
+  saveSettings();  // empty override -> entry dropped on save
+});
+$('settingsSave').addEventListener('click', saveSettings);
 
 renderSessions();
 loadKBs();

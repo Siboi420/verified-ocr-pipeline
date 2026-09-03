@@ -18,3 +18,5 @@ sessions/
 
 # logs
 *.log
+# generation profiles (global + per-model settings)
+settings.json

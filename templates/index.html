@@ -279,6 +279,14 @@ function flatItems() {
     pg.items.map(it => ({...it, page: pg.page})));
 }
 
+// Full (unfiltered) item count of the page containing `it` — the backend
+// renumbers over ALL page items, so this is the input's max, not the
+// count of currently-visible items.
+function pageCountFor(it) {
+  const pg = ((DOC.pages || []).find(p => p.items.some(x => x.id === it.id)));
+  return pg ? pg.items.length : 1;
+}
+
 // Servers ship page items in priority order (the id-assignment order); the
 // display/navigation order is `order` — document order by default, manual
 // after a reorder. Missing order falls back to Infinity so unordered legacy
@@ -558,24 +566,37 @@ function renderItem(it) {
 
   const actions = document.createElement("div");
   actions.className = "actions";
-  const orderLabel = document.createElement("label");
-  orderLabel.className = "muted";
-  orderLabel.title = "display order on this page (numbers can be fractional to insert between)";
-  orderLabel.appendChild(document.createTextNode("order "));
-  const orderIn = document.createElement("input");
-  orderIn.type = "text";
-  orderIn.className = "order";
-  orderIn.size = 4;
-  orderIn.value = it.order !== undefined ? it.order : "";
-  orderLabel.appendChild(orderIn);
-  actions.appendChild(orderLabel);
-  actions.innerHTML += `
+  // innerHTML first — setting it later would wipe any children appended
+  // before (the order label used to be appended here and silently destroyed).
+  actions.innerHTML = `
     <input type="checkbox" class="pick" title="select for bulk">
     <button class="act accept">Accept</button>
     <button class="act edit">Edit + Accept</button>
     <button class="act reject">Reject</button>
     <button class="act skip">Skip</button>
     <button class="act del">Delete</button>`;
+  const orderLabel = document.createElement("label");
+  orderLabel.className = "muted";
+  orderLabel.title = "position on this page (1..n): editing moves the item there and renumbers the page";
+  orderLabel.appendChild(document.createTextNode("order "));
+  const orderIn = document.createElement("input");
+  orderIn.type = "number";
+  orderIn.className = "order";
+  orderIn.size = 4;
+  orderIn.min = 1;
+  orderIn.max = pageCountFor(it);
+  orderIn.step = 1;
+  orderIn.value = it.order !== undefined ? it.order : "";
+  orderIn.addEventListener("change", async () => {
+    const o = Number(orderIn.value);
+    if (!Number.isFinite(o)) { alert("Position must be a finite number"); return; }
+    const out = await post(`/item/${DOC.doc_id}/${it.id}/order`, {order: o});
+    Object.assign(DOC, out.doc);
+    render();
+  });
+  orderLabel.appendChild(orderIn);
+  actions.appendChild(orderLabel);
+
   if (it.type === "table") {
     const capBox = document.createElement("button");
     capBox.className = "act capbox";
@@ -801,13 +822,6 @@ document.getElementById("items").addEventListener("click", async e => {
     await act(itemId, "reject");
   } else if (cls.includes("skip")) {
     await act(itemId, "skip");
-  } else if (cls.includes("order")) {
-    const input = el.querySelector("input.order");
-    const o = parseFloat(input.value);
-    if (!Number.isFinite(o)) { alert("Order must be a finite number"); return; }
-    const out = await post(`/item/${DOC.doc_id}/${itemId}/order`, {order: o});
-    Object.assign(DOC, out.doc);
-    render();
   } else if (cls.includes("del")) {
     if (!confirm("Delete this item?")) return;
     const out = await post(`/item/${DOC.doc_id}/${itemId}/delete`, {});

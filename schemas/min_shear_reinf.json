@@ -1,6 +1,6 @@
 {
   "name": "min_shear_reinf",
-  "description": "Minimum area of shear reinforcement Av,min per metre of beam, ACI 318M-19 §9.6.3.3: max(0.062·sqrt(f'c)·b_w/f_yt, 0.35·b_w/f_yt) × 1000. Normal-weight concrete. Pass b_w only — a 200x300 beam -> b_w=200; no effective depth involved.",
+  "description": "Minimum area of shear reinforcement Av,min per metre of beam, ACI 318M-19 §9.6.3.3: max(0.062·sqrt(f'c)·b_w/f_yt, 0.35·b_w/f_yt) × 1000. Normal-weight concrete. Pass b_w only — a 200x300 beam -> b_w=200; no effective depth involved. Also use for questions phrased as 'minimum Ast', 'minimum shear reinforcement', or 'minimum stirrup area' (Av,min).",
   "parameters": {
     "type": "object",
     "properties": {
