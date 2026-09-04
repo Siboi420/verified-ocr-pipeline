@@ -405,7 +405,15 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   (wrapper result or `{error}`), final `answer`); `answer_turn(user_turn, history,
   kb_id, max_tokens=None)` → `(answer, trace)` with a `retrieval` step prepended when
   `kb_id` is set (`None` → no retrieval; `max_tokens=None` → the resolved
-  profile's cap, applied in `chat()`); `chat(messages, tools, max_tokens=None,
+  profile's cap, applied in `chat()`); **no-KB sessions answer from general
+  knowledge (2026-11):** when `kb_id` is None the context is
+  `"(no knowledge base attached)"` and the system prompt swaps to
+  `SYSTEM_PROMPT_BARE` (drops the RAG source-citation / "if not in your
+  sources, say so" guardrails; tool/format rules identical) — previously
+  the model refused general questions like "what is concrete made out of?"
+  with "not in your sources" when no KB was attached (session
+  a192daf89093). With `kb_id` set the full `SYSTEM_PROMPT` (source
+  guardrails) applies. `chat(messages, tools, max_tokens=None,
   thinking=False)`
   resolves the loaded model's generation profile once via
   `profiles.resolve(_loaded_model())` and sends `temperature`, `repeat_penalty`,
@@ -788,7 +796,7 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   stubs deleted, remaining: granite-4.2-8b (Q6_K), GLM-OCR (Q8_0),
   takes a literal model path (+ optional `variant` from the dropdown) with
   variant-aware "already loaded" matching.
-  Smoke test now 239 checks.
+  Smoke test now 238 checks.
 - **Generation profiles (implemented 2026-09-15):** a global default profile
   + per-model overrides in `BASE/settings.json` (gitignored), applied to
   every chat session automatically via `profiles.resolve` — built-ins
@@ -898,7 +906,7 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
 
 - `python3 test_itemizer.py` — 73 itemizer assertions.
 - `python3 functions/test_shear_tools.py` — 28 hand-calc checks for the `functions/` shear/flexure tools (Av,min mm²/m, simplified Vc, row (c) size-effect Vc incl. λ_s + ρ_w, adequate-stirrup rows (a)/(b), partial stirrups → row (c) + V_s, d↔h/cover_cg equivalence for shear and flex, d-resolution errors (XOR/neither/cover≥h), row (a) fallback, wrapper shape + unit/basis incl. h-path, validation error paths; plus 9 `design_beam` checks: pure-shear optimum 250×350×20 D19×1 (with the stirrup-clamp regression guard: s == s_max == d/2 and Vs > 0) cheaper-or-equal to the b=300,d=500 class, min-stirrup path vs Av,min, flexure gate binds (φM_n ≥ M_u, A_s ≥ As,min, no 250×350 row at M_u=200, optimum 250×550×20 D16×6), d = h − cover − φ_long/2 (incl. custom cover), Vs ≤ 0.66·√f'c·b·d + s ∈ [100, s_max] + s_max switch, bound/step iteration (max_b=385 → b ≤ 385), infeasible → `[]` + reason (V_u=300 and M_u=900 cases), cost-ranked top-5 determinism, wrapper registration + array/object validation errors + string-key `rate_conc` applied (cost_concrete equals the custom rate·b·h/1e6) + non-numeric grade key → ValueError; plain asserts + PASS/FAIL, exit non-zero on failure.
-- `python3 smoke_test.py` — 239 end-to-end checks via Flask test client (no live OCR,
+- `python3 smoke_test.py` — 238 end-to-end checks via Flask test client (no live OCR,
   no backend; `rag_uploader._api`, `models.current_model/unload/load/list_models`,
   and `orchestrator.answer_turn` stubbed where they'd hit :8888):
   the original 132 assert `?ocr=1` redirect, no-key OCR error,
@@ -951,7 +959,7 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   per-model override clearing the entry, the chat route calling
   `answer_turn` with no positional max-tokens, and `/chat` rendering the
   settings panel (global + per-model fieldsets).
-  the new 5 (234 -> 239) add dark theme + chat layout: `/` and `/chat` both
+  the new 5 (233 -> 238) add dark theme + chat layout: `/` and `/chat` both
   carry `<html lang="en" data-theme="dark">` + the anti-FOUC head
   script (`localStorage.getItem('theme') || 'dark'`) + the shared
   `#themeBtn`, `/` carries the dark token palette (`--bg:#0f172a`,
@@ -981,10 +989,13 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   `repeat_penalty` keeps the default, `None` max_tokens -> profile default;
   `enable_thinking` EXPLICIT per request — default chat() sends false,
   explicit `thinking=True` sends true) and `answer_turn` routing/retry
-  decisions with `run_loop` stubbed (parameter-extraction question → fast
-  first pass then one escalation on an empty answer; ambiguous keyword
-  question → thinking on the FIRST pass, no retry; calc-style no-keyword
-  question answered without a tool call → fast then retry).
+  decisions with `run_loop` + `retrieve` stubbed (parameter-extraction
+  question → fast first pass then one escalation on an empty answer;
+  ambiguous keyword question → thinking on the FIRST pass, no retry;
+  calc-style no-keyword question answered without a tool call → fast then
+  retry; **no-KB (kb_id=None) sessions use `SYSTEM_PROMPT_BARE` and the
+  "no knowledge base attached" context on every pass, KB sessions use the
+  RAG `SYSTEM_PROMPT` + the retrieved chunk text**).
   No HTTP-handler block — the server is gone.
 - `python3 rag_uploader.py --selftest` — offline grouping/ordering/Unicode/empty-skip
   checks (unchanged but now with `_api` raising RuntimeError).

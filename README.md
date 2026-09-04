@@ -25,7 +25,9 @@ A single Flask server on `:5000` serves everything — two browser-style tabs:
   parameter names are normalized on render (`cover` → `p`;
   `clear_cover` / `stirrup_diameter` / `longitudinal_bar_diameter` → spaced
   words), so equations read as clean notation instead of raw
-  `\text{…\_…}` markup.
+  `\text{…\_…}` markup. With **no KB selected** the assistant answers from
+  general engineering knowledge; with a KB it stays source-grounded (cites
+  chunks, says when something isn't in the sources).
 
 Both pages share a top bar with the **model control**: a chip showing which
 model is loaded plus a dropdown of the GGUF models/quants actually cached on
@@ -112,7 +114,7 @@ python3 functions/test_shear_tools.py    # 28 beam tool checks
 python3 orchestrator.py --selftest       # chat loop trace checks (offline)
 python3 rag_uploader.py --selftest       # KB render checks (offline)
 python3 models.py --selftest             # model mgmt wiring (offline)
-python3 smoke_test.py                    # 239 end-to-end route checks (no
+python3 smoke_test.py                    # 238 end-to-end route checks (no
                                               # live OCR)
 ```
 

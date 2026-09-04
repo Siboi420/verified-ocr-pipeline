@@ -76,6 +76,28 @@ SYSTEM_PROMPT = (
     "answer them with the min_shear_reinf tool."
 )
 
+# No-KB session variant: no retrieved context, so the model answers from its
+# own general engineering knowledge instead of refusing with "not in your
+# sources". Tool/format rules are identical to SYSTEM_PROMPT.
+SYSTEM_PROMPT_BARE = (
+    "You are a structural engineering assistant. Answer the question from "
+    "general engineering knowledge (no knowledge base is attached to this "
+    "session). No arithmetic from memory - always call the tool for any "
+    "calculation. Flag uncertainty if the input is ambiguous. No engineering "
+    "judgment - redirect to an engineer for design advice. Sections sized as "
+    "\"200x300\" are b x h. Capacity tools take effective depth d, or h plus "
+    "`cover_cg` (d = h - cover_cg); never pass total height h as d. After "
+    "the tool calls return their results, answer the user directly with the "
+    "final value and its basis - do not include a chain-of-thought / reasoning "
+    "preamble. Call a tool only when a number needs computing; once all needed "
+    "tool results are back, stop and write the final answer immediately - do "
+    "not call further tools, re-run a tool, or repeat yourself. When the user "
+    "asks to break down, explain, or verify a previous tool result, re-run the "
+    "tool with the same inputs instead of recomputing from memory. 'Ast', "
+    "'minimum shear reinforcement', and 'minimum stirrup area' all mean "
+    "Av,min - answer them with the min_shear_reinf tool."
+)
+
 # Qwen marker-format tool call: <tool_call>{"name": ..., "arguments": {...}}</tool_call>
 _TOOL_CALL_RE = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL)
 
@@ -303,11 +325,12 @@ def _is_ambiguous(question):
     return bool(_AMBIGUOUS_RE.search(question))
 
 
-def _question_messages(user_turn, history, context):
+def _question_messages(user_turn, history, context, system=SYSTEM_PROMPT):
     """system + history + the user turn with the retrieved context (fresh
     list per call, so the retry restarts from the seed, not the failed
-    loop's appended messages)."""
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    loop's appended messages). `system` is SYSTEM_PROMPT (KB attached) or
+    SYSTEM_PROMPT_BARE (no KB — answer from general knowledge)."""
+    messages = [{"role": "system", "content": system}]
     for m in history:
         if m.get("role") in ("user", "assistant"):
             messages.append({"role": m["role"], "content": m.get("content") or ""})
@@ -352,17 +375,23 @@ def answer_turn(user_turn, history, kb_id, max_tokens=None):
     {"kind": "retrieval", "chunks": […]}."""
     trace = []
     context = "(no retrieved chunks)"
+    system = SYSTEM_PROMPT
     if kb_id:
         chunks = retrieve(user_turn, kb_id)
         trace.append({"kind": "retrieval", "chunks": chunks})
         context = "\n\n".join(chunks) if chunks else context
+    else:
+        # no KB: no retrieval, so the RAG source-guardrails don't apply —
+        # the caller answers from general knowledge
+        context = "(no knowledge base attached)"
+        system = SYSTEM_PROMPT_BARE
     thinking = _is_ambiguous(user_turn)
     answer, steps = run_loop(
-        _question_messages(user_turn, history, context), load_tools(), max_tokens, thinking)
+        _question_messages(user_turn, history, context, system), load_tools(), max_tokens, thinking)
     if not thinking and _wants_retry(answer, steps, user_turn):
         # one-shot escalation: the fast path failed, try once with thinking
         answer, steps = run_loop(
-            _question_messages(user_turn, history, context), load_tools(), max_tokens, True)
+            _question_messages(user_turn, history, context, system), load_tools(), max_tokens, True)
     return answer, trace + steps
 
 
@@ -529,27 +558,43 @@ def selftest():
     #    a tool call
     saved_run_loop = globals()["run_loop"]
     seen = []
+    bare_sys = []  # system prompt used on each pass (bare mode asserts the BARE prompt)
+    saved_retrieve = globals()["retrieve"]
 
     def fake_run_loop(messages, tools, max_tokens, thinking=False,
                       answer="") -> tuple:
         seen.append(thinking)
+        bare_sys.append(messages[0]["content"])
+        bare_sys.append(messages[-1]["content"])  # user turn incl. context
         if answer:
             return answer, [{"kind": "answer", "content": answer}]
         return "", [{"kind": "answer", "content": ""}]
 
+    globals()["retrieve"] = lambda q, kb_id: ["chunk one", "chunk two"]
     globals()["run_loop"] = fake_run_loop
     try:
         answer_turn("what is Av,min for b_w=350, f_c=28, f_yt=420?", [], None)
         answer_turn("which design should I assume for this beam?", [], None)
         answer_turn("calculate Vc for the beam", [], None)
+        # KB attached: the RAG prompt (source-citation guardrails) is used
+        answer_turn("what is Av,min for b_w=350, f_c=28, f_yt=420?", [], "kb-1")
     finally:
         globals()["run_loop"] = saved_run_loop
+        globals()["retrieve"] = saved_retrieve
     # extraction question: fast (False) then escalate (True)
     assert seen[:2] == [False, True], f"fast-then-escalate expected, got {seen[:2]}"
     # ambiguous design question: thinking on first pass, no retry
     assert seen[2:3] == [True], f"ambiguous routes to thinking first pass, got {seen[2:3]}"
     # calc-style with no keyword: fast (False) then retry (True)
     assert seen[3:5] == [False, True], f"calc retry expected, got {seen[3:5]}"
+    # no-KB sessions answer from general knowledge, not source-guardrail refusals
+    # (bare_sys alternates [system, user-with-context, system, ...] per pass)
+    assert all(s == SYSTEM_PROMPT_BARE for s in bare_sys[0:10:2]), \
+        f"bare sessions should use SYSTEM_PROMPT_BARE, got {bare_sys[0:10:2]}"
+    assert all("no knowledge base attached" in s for s in bare_sys[1:10:2]), \
+        bare_sys[1:10:2]
+    assert bare_sys[10] == SYSTEM_PROMPT, "KB sessions should use the RAG SYSTEM_PROMPT"
+    assert "chunk one" in bare_sys[11], "KB session user turn carries the retrieved chunks"
 
     # repetition guard: a degenerate repeated-line block is truncated
     # (the 8B-model failure mode that burned the whole token budget in
