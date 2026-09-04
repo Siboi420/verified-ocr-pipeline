@@ -423,6 +423,24 @@ def t_design_wrapper():
     else:
         raise AssertionError("design_beam rate_conc non-numeric key: expected ValueError")
 
+    # preset="idr" substitutes the Indonesian price table (Rp/m³, Rp/kg);
+    # explicit rates always beat a preset; unknown preset -> ValueError
+    idr = wrapper.call_tool("design_beam", V_u=50, M_u=0, max_b=300, max_h=500,
+                            preset="idr")
+    assert idr["value"]["feasible"], idr
+    o = idr["value"]["optimum"]
+    expected_idr = beam_calc.PRICE_PRESETS["idr"]["rate_conc"][o["f_c"]] * o["b"] * o["h"] / 1e6
+    near(o["cost_concrete"], expected_idr, 1e-9, "idr preset concrete rate applied")
+    assert o["cost"] > 1000, "idr costs are in Rp (thousands), not USD"
+    # explicit rate_conc beats the preset
+    explicit = wrapper.call_tool("design_beam", V_u=50, M_u=0, max_b=300, max_h=500,
+                                 preset="idr", rate_conc={"20": 99, "25": 99, "30": 99, "35": 99, "40": 99})
+    o2 = explicit["value"]["optimum"]
+    near(o2["cost_concrete"], 99 * o2["b"] * o2["h"] / 1e6, 1e-9, "explicit rate beats preset")
+    expect_value_error("design_beam", {"V_u": 50, "M_u": 0, "max_b": 400,
+                                       "max_h": 700, "preset": "eur"},
+                       "one of")
+
     expect_value_error("design_beam", {"V_u": 50, "M_u": 0, "max_b": 400,
                                        "max_h": 700, "f_c_list": "nope"},
                        "array")

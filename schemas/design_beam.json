@@ -12,8 +12,9 @@
       "f_yt": {"type": "number", "description": "Stirrup yield strength (MPa)", "exclusiveMinimum": 0, "default": 420},
       "f_y": {"type": "number", "description": "Longitudinal steel yield strength (MPa)", "exclusiveMinimum": 0, "default": 420},
       "f_c_list": {"type": "array", "items": {"type": "number"}, "description": "Concrete grades to search (MPa); default [20, 25, 30, 35, 40]", "default": [20, 25, 30, 35, 40]},
-      "rate_conc": {"type": "object", "description": "Concrete unit costs $/m³ keyed by f'c grade; default {20:120, 25:125, 30:130, 35:135, 40:140} (placeholder rates, not real prices); missing grades fall back to the defaults", "default": {"20": 120, "25": 125, "30": 130, "35": 135, "40": 140}},
-      "rate_steel": {"type": "number", "description": "Steel unit cost $/kg (placeholder, not a real price)", "exclusiveMinimum": 0, "default": 1.2}
+      "rate_conc": {"type": "object", "description": "Concrete unit costs $/m³ keyed by f'c grade; default {20:120, 25:125, 30:130, 35:135, 40:140} (placeholder rates, not real prices); missing grades fall back to the defaults. Explicit rates beat the preset.", "default": {"20": 120, "25": 125, "30": 130, "35": 135, "40": 140}},
+      "rate_steel": {"type": "number", "description": "Steel unit cost $/kg (placeholder, not a real price); explicit beats the preset", "exclusiveMinimum": 0, "default": 1.2},
+      "preset": {"type": "string", "description": "Named unit-rate table instead of the USD default: \"usd\" (default, $/m³ + $/kg) or \"idr\" (Indonesian market, Rp/m³ by grade + Rp/kg rebar). Explicit rate_conc/rate_steel always win over a preset.", "enum": ["usd", "idr"]}
     },
     "required": ["V_u", "M_u", "max_b", "max_h"],
     "additionalProperties": false

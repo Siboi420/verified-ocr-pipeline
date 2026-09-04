@@ -13,7 +13,9 @@ A single Flask server on `:5000` serves everything — two browser-style tabs:
   export verified JSON. Draw a box on the page to OCR just that region.
 - **Chat** — multi-turn sessions against a knowledge base (hybrid RAG,
   top_k=3, per-session KB selector + 4 ACI beam calculation tools
-  (shear/flexure/design). Answers and
+  (shear/flexure/design; the `design_beam` size tool defaults to USD unit
+  rates and takes a `preset="idr"` for Indonesian-market prices). Answers
+  and
   messages render **markdown** (tables, bold, headers, lists) **and LaTeX**;
   every reply is tagged with the KB it used (`via KB: <name>` / `no KB`).
   Developer mode shows the retrieval / reasoning / tool-call trace.
@@ -90,7 +92,9 @@ python3 smoke_test.py                    # 233 end-to-end route checks (no
 - `orchestrator.py` — RAG + tool-calling chat engine (CLI + importable by app)
 - `models.py` — Unsloth model list (cached disk, per-quant) / load / unload / status
 - `functions/` — ACI 318M-19 beam shear/flexure/design tools (`beam_calc.py`,
-  schema-driven `wrapper.py`)
+  schema-driven `wrapper.py`; `design_beam` sizes the cheapest beam for
+  given Vu/Mu + section bounds, min total cost per metre at USD-default
+  placeholder rates or the `idr` preset (Indonesian Rp/m³, Rp/kg))
 - `schemas/` — OpenAI function-calling tool schemas
 - `templates/` — `_header.html` (tabs + per-quant model dropdown), `index.html` (OCR),
   `chat.html` (chat: markdown + LaTeX rendering, KB tag, dev trace)

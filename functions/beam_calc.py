@@ -180,9 +180,19 @@ STEP = 50  # mm, section grid step
 B_MIN = 250  # mm
 H_MIN = 350  # mm
 RHO_STEEL = 7850.0  # kg/m³
-# Placeholder unit rates ($/m³ by grade, $/kg steel) — NOT real market prices.
+# Placeholder unit rates — NOT real market prices. `usd`: $/m³ by grade +
+# $/kg steel (current default). `idr`: Indonesian market (Rp/m³ by K-grade
+# ladder for ~19-32 MPa, Rp/kg BJTS 420B rebar) — selectable as a preset via
+# design_beam(preset="idr") or the wrapper; the tool still defaults to USD.
 DEFAULT_RATE_CONC = {20: 120, 25: 125, 30: 130, 35: 135, 40: 140}
 DEFAULT_RATE_STEEL = 1.2
+PRICE_PRESETS = {
+    "usd": {"rate_conc": dict(DEFAULT_RATE_CONC), "rate_steel": DEFAULT_RATE_STEEL},
+    "idr": {
+        "rate_conc": {20: 1_050_000, 25: 1_150_000, 30: 1_250_000, 35: 1_350_000, 40: 1_500_000},
+        "rate_steel": 11_000,  # Rp/kg BJTS 420B
+    },
+}
 
 
 def _as_min(b, d_eff, f_c, f_y):
@@ -191,7 +201,8 @@ def _as_min(b, d_eff, f_c, f_y):
 
 
 def design_beam(V_u, M_u, max_b, max_h, cover=40.0, f_yt=420.0, f_y=420.0,
-                f_c_list=None, rate_conc=None, rate_steel=DEFAULT_RATE_STEEL):
+                f_c_list=None, rate_conc=None, rate_steel=DEFAULT_RATE_STEEL,
+                preset=None):
     """Cheapest feasible beam design for factored V_u (kN) + M_u (kN·m).
 
     Deterministic full-grid search: b in 250..max_b step 50, h in 350..max_h
@@ -209,9 +220,15 @@ def design_beam(V_u, M_u, max_b, max_h, cover=40.0, f_yt=420.0, f_y=420.0,
 
     Cost per metre = concrete (rate_conc[f'c]·b·h/1e6) + longitudinal steel
     (rate_steel·ρ·A_s/1e6) + stirrup steel (rate_steel·ρ·A_v·perim/(s·1e6),
-    perimeter ≈ 2(b−2·cover)+2(h−2·cover)). Unit rates are configurable
-    placeholders, not asserted as real prices. M_u is required (shear-only
-    sizing is out of scope; pass M_u=0 for a flexurally trivial demand).
+    perimeter ≈ 2(b−2·cover)+2(h−2·cover)).
+    Unit rates: the tool DEFAULTS TO USD placeholders (`usd` preset). Pass
+    preset="idr" for Indonesian-market rates (Rp/m³, Rp/kg): it substitutes
+    the price table while keeping all code-level placeholders/currencies in
+    the design dict numeric — the returned `cost` is in the preset's unit
+    (Rp for idr, $ for usd). Explicit rate_conc/rate_steel/preset always win
+    over the defaults; a preset is ignored when explicit rates are given.
+    M_u is required (shear-only sizing is out of scope; pass M_u=0 for a
+    flexurally trivial demand).
 
     ponytail: longitudinal-bar placement geometry within width b (bar-fit /
     min spacing check) is NOT verified — add only if a real design case needs it.
@@ -240,6 +257,18 @@ def design_beam(V_u, M_u, max_b, max_h, cover=40.0, f_yt=420.0, f_y=420.0,
 
     f_cs = sorted(set(f_c_list or DEFAULT_F_C_LIST))
     rates = dict(DEFAULT_RATE_CONC)
+    steel_rate = rate_steel
+    if rate_conc is None and preset:
+        # named price table (idr = Indonesian Rp/m³, Rp/kg) — explicit rates
+        # always win over a preset (checked below with rate_conc None)
+        base = PRICE_PRESETS.get(preset)
+        if not base:
+            raise ValueError(
+                f"design_beam: unknown preset '{preset}'; "
+                f"available: {sorted(PRICE_PRESETS)}"
+            )
+        rates.update(base["rate_conc"])
+        steel_rate = base["rate_steel"]
     if rate_conc:
         # JSON/the model send grade keys as strings ("20": 100) — normalize
         # to int grades so the customization actually applies, never silently
@@ -301,8 +330,8 @@ def design_beam(V_u, M_u, max_b, max_h, cover=40.0, f_yt=420.0, f_y=420.0,
                         v_s = stirrup["v_s_kN"]
                         phiV_n = 0.75 * (v_c + v_s)
                         cost_conc = rates[f_c] * b * h / 1e6
-                        cost_long = rate_steel * RHO_STEEL * a_s / 1e6
-                        cost_stir = rate_steel * RHO_STEEL * stirrup["av"] * perimeter \
+                        cost_long = steel_rate * RHO_STEEL * a_s / 1e6
+                        cost_stir = steel_rate * RHO_STEEL * stirrup["av"] * perimeter \
                             / (stirrup["s"] * 1e6)
                         cost = cost_conc + cost_long + cost_stir
 

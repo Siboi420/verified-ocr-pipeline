@@ -59,6 +59,14 @@ def _validate(name, schema, kwargs):
     for key, value in kwargs.items():
         spec = props[key]
         ptype = spec.get("type", "number")
+        if ptype == "string":
+            enum = spec.get("enum")
+            if not isinstance(value, str) or (enum and value not in enum):
+                raise ValueError(
+                    f"{name}: parameter '{key}' must be one of "
+                    f"{enum or ['<any string>']}, got {value!r}"
+                )
+            continue
         if ptype == "array":
             if not isinstance(value, list):
                 raise ValueError(
