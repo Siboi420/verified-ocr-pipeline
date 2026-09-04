@@ -897,15 +897,15 @@ def main():
               "GET /api/settings empty when no file")
         r = client.post("/api/settings", json={
             "global": {"temperature": 0.3, "bogus": 1},
-            "models": {"unsloth/granite-4.1-8b-GGUF": {"top_k": 40,
+            "models": {"ibm-granite/granite-4.2-8b-GGUF": {"top_k": 40,
                                                          "context_length": 32768}}}).get_json()
         check(r == {"global": {"temperature": 0.3},
-                     "models": {"unsloth/granite-4.1-8b-GGUF":
+                     "models": {"ibm-granite/granite-4.2-8b-GGUF":
                                  {"top_k": 40, "context_length": 32768}}},
               "POST /api/settings sanitizes + drops unknown keys")
         r = client.get("/api/settings")
         check(r.status_code == 200 and r.get_json()["models"][
-            "unsloth/granite-4.1-8b-GGUF"]["top_k"] == 40,
+            "ibm-granite/granite-4.2-8b-GGUF"]["top_k"] == 40,
               "GET reflects persisted settings")
         r = client.post("/api/settings",
                         json={"global": {"temperature": float("nan")}})
@@ -915,7 +915,7 @@ def main():
         # the model worker resolves the target's context_length from the
         # profile and passes it to models.load as max_seq_length
         client.post("/api/settings", json={
-            "models": {"unsloth/granite-4.1-8b-GGUF": {"context_length": 4096}}})
+            "models": {"ibm-granite/granite-4.2-8b-GGUF": {"context_length": 4096}}})
         load_calls.clear()
         r = client.post("/api/model/load",
                         json={"model": appmod.config.CHAT_MODEL})
@@ -926,7 +926,7 @@ def main():
               f"profile context_length threaded into models.load ({load_calls})")
         # empty per-model override = clear (entry dropped, not persisted)
         client.post("/api/settings", json={
-            "models": {"unsloth/granite-4.1-8b-GGUF": {}}})
+            "models": {"ibm-granite/granite-4.2-8b-GGUF": {}}})
         check(client.get("/api/settings").get_json()["models"] == {},
               "empty per-model override clears the entry")
     finally:
@@ -936,6 +936,12 @@ def main():
          appmod.models.load) = saved_m3
 
     # --- model routes (models.current_model/unload/load stubbed) ---
+    # sandbox the generation-profile too: the real settings.json is user data
+    # (may carry a context_length for the installed chat model, which the
+    # worker threads into models.load and would leak into load-seq asserts)
+    saved_spath2 = appmod.profiles.SETTINGS_PATH
+    tmp_settings2 = tempfile.mkdtemp(prefix="settings_model_")
+    appmod.profiles.SETTINGS_PATH = Path(tmp_settings2) / "settings.json"
     model_state: dict = {"loaded": None}
     model_calls = []
     model_jobsteps = []
@@ -1061,9 +1067,9 @@ def main():
         # already-loaded matches the variant too: the same repo loaded with a
         # different quant must NOT short-circuit
         model_calls.clear()
-        model_state["loaded"] = "unsloth/granite-4.1-8b-GGUF/snapshots/s1/granite-4.1-8b-UD-Q6_K_XL.gguf"
+        model_state["loaded"] = "ibm-granite/granite-4.2-8b-GGUF/snapshots/s1/granite-4.2-8b-Q6_K.gguf"
         r = client.post("/api/model/load",
-                        json={"model": appmod.config.CHAT_MODEL, "variant": "UD-Q6_K_XL"})
+                        json={"model": appmod.config.CHAT_MODEL, "variant": "Q6_K"})
         check(r.get_json()["status"] == "done"
               and r.get_json()["step"] == "already loaded",
               "already-loaded matches the loaded variant")
@@ -1088,6 +1094,8 @@ def main():
     finally:
         (appmod.models.current_model, appmod.models.unload, appmod.models.load,
          appmod.models.list_models) = saved_m
+        appmod.profiles.SETTINGS_PATH = saved_spath2
+        shutil.rmtree(tmp_settings2, ignore_errors=True)
 
     # --- shared header: tabs + model control on both pages ---
     r = client.get("/")

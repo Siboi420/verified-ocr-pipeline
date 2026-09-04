@@ -20,9 +20,10 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SCHEMA_DIR = PROJECT_ROOT / "schemas"
 
 REGISTRY = {
+    "design_beam": beam_calc.design_beam,
+    "flex_capacity": beam_calc.flex_capacity,
     "min_shear_reinf": beam_calc.min_shear_reinf,
     "shear_capacity": beam_calc.shear_capacity,
-    "flex_capacity": beam_calc.flex_capacity,
 }
 
 
@@ -57,6 +58,35 @@ def _validate(name, schema, kwargs):
 
     for key, value in kwargs.items():
         spec = props[key]
+        ptype = spec.get("type", "number")
+        if ptype == "array":
+            if not isinstance(value, list):
+                raise ValueError(
+                    f"{name}: parameter '{key}' must be an array of numbers, "
+                    f"got {type(value).__name__}"
+                )
+            for v in value:
+                if isinstance(v, bool) or not isinstance(v, (int, float)) \
+                        or not math.isfinite(v):
+                    raise ValueError(
+                        f"{name}: parameter '{key}' must contain only finite "
+                        f"numbers"
+                    )
+            continue
+        if ptype == "object":
+            if not isinstance(value, dict):
+                raise ValueError(
+                    f"{name}: parameter '{key}' must be an object with numeric "
+                    f"values, got {type(value).__name__}"
+                )
+            for v in value.values():
+                if isinstance(v, bool) or not isinstance(v, (int, float)) \
+                        or not math.isfinite(v):
+                    raise ValueError(
+                        f"{name}: parameter '{key}' must map keys to finite "
+                        f"numbers"
+                    )
+            continue
         if spec.get("type") == "number" and isinstance(value, bool):
             raise ValueError(f"{name}: parameter '{key}' must be a number, got {type(value).__name__}")
         if not isinstance(value, (int, float)):

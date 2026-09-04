@@ -80,7 +80,7 @@ def list_models():
             continue
         base = Path(repo).name
         if base.endswith("-GGUF"):
-            base = base[:-5]  # "granite-4.1-8b-GGUF" -> "granite-4.1-8b"
+            base = base[:-5]  # "granite-4.2-8b-GGUF" -> "granite-4.2-8b"
         for fn in _cached_gguf_files(c.get("cache_path")):
             quant = fn[:-5] if fn.endswith(".gguf") else fn  # strip .gguf
             if quant.startswith(base + "-"):
@@ -112,8 +112,8 @@ def load(model, variant=None, max_seq_length=None):
     variant = variant or (config.CHAT_GGUF_VARIANT
                           if path == config.CHAT_MODEL else None)
     if variant:
-        # the backend defaults this repo to UD-Q4_K_XL (not cached -> slow
-        # download); pin the cached quant via its gguf_variant field
+        # pin the cached quant via gguf_variant (a ":<quant>" suffix inside
+        # model_path is treated as a literal repo id and rejected)
         body["gguf_variant"] = variant
     if max_seq_length is not None:
         body["max_seq_length"] = max_seq_length
@@ -127,7 +127,7 @@ def load(model, variant=None, max_seq_length=None):
 def _selftest():
     """Offline checks (no server, no key): constant wiring and the load
     payload shape."""
-    assert config.CHAT_MODEL == "unsloth/granite-4.1-8b-GGUF", config.CHAT_MODEL
+    assert config.CHAT_MODEL == "ibm-granite/granite-4.2-8b-GGUF", config.CHAT_MODEL
     assert MODELS == {"ocr": config.MODEL, "chat": config.CHAT_MODEL}, MODELS
     assert config.CHAT_MAX_SEQ_LENGTH == 32768
     assert config.OCR_MAX_SEQ_LENGTH is None
@@ -144,7 +144,7 @@ def _selftest():
         assert sent["data"]["model_path"] == config.CHAT_MODEL
         assert sent["data"]["force_reload"], "load must set force_reload"
         assert sent["data"]["max_seq_length"] == 32768
-        assert sent["data"]["gguf_variant"] == "UD-Q6_K_XL", \
+        assert sent["data"]["gguf_variant"] == config.CHAT_GGUF_VARIANT, \
             "chat load must pin the cached GGUF variant"
         # literal path: posted verbatim, no max_seq_length (backend default)
         load("some/local/model-GGUF")
@@ -161,7 +161,7 @@ def _selftest():
         # (the generation profile threads context_length through the app)
         load("chat", max_seq_length=4096)
         assert sent["data"]["max_seq_length"] == 4096
-        assert sent["data"]["gguf_variant"] == "UD-Q6_K_XL", \
+        assert sent["data"]["gguf_variant"] == config.CHAT_GGUF_VARIANT, \
             "variant pin still applies when a profile supplies max_seq_length"
         # config-MODEL path still gets its role's length override
         if config.OCR_MAX_SEQ_LENGTH:
@@ -175,7 +175,7 @@ def _selftest():
         tmp = tempfile.mkdtemp(prefix="models_selftest_")
         gran = _P(tmp) / "granite" / "snapshots" / "s1"
         gran.mkdir(parents=True)
-        (gran / "granite-4.1-8b-UD-Q6_K_XL.gguf").touch()
+        (gran / "granite-4.2-8b-Q6_K.gguf").touch()
         glm_dir = _P(tmp) / "glm" / "snapshots" / "s1"
         glm_dir.mkdir(parents=True)
         (glm_dir / "GLM-OCR-Q8_0.gguf").touch()
@@ -188,7 +188,7 @@ def _selftest():
         def fake_gguf(method, path, data=None):
             calls.append(path)
             return {"cached": [
-                {"repo_id": "unsloth/granite-4.1-8b-GGUF",
+                {"repo_id": "ibm-granite/granite-4.2-8b-GGUF",
                  "cache_path": str(_P(tmp) / "granite")},
                 {"repo_id": "ggml-org/GLM-OCR-GGUF",
                  "cache_path": str(_P(tmp) / "glm")},
@@ -198,7 +198,7 @@ def _selftest():
         globals()["_api"] = fake_gguf
         got = list_models()
         assert calls == ["/api/models/cached-gguf"], calls
-        assert {"path": "unsloth/granite-4.1-8b-GGUF", "name": "granite-4.1-8b (UD-Q6_K_XL)", "variant": "UD-Q6_K_XL"} in got
+        assert {"path": "ibm-granite/granite-4.2-8b-GGUF", "name": "granite-4.2-8b (Q6_K)", "variant": "Q6_K"} in got
         assert {"path": "ggml-org/GLM-OCR-GGUF", "name": "GLM-OCR (Q8_0)", "variant": "Q8_0"} in got
         assert {"path": "ggml-org/GLM-OCR-GGUF", "name": "GLM-OCR (f16)", "variant": "f16"} in got
         assert all("mmproj" not in g["name"] for g in got), \

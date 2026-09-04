@@ -1,0 +1,25 @@
+{
+  "name": "design_beam",
+  "description": "SIZE / DESIGN a rectangular beam: given factored demands V_u (kN) and M_u (kN·m) and the maximum allowed section max_b × max_h (mm), returns the CHEAPEST feasible design (b, h, d, f'c, longitudinal bars, stirrup bar + spacing) found by a deterministic full-grid search, plus the top-5 ranked alternatives and a reason when nothing fits. Section grid: b from 250 to max_b step 50, h from 350 to max_h step 50; f'c from the fixed grade list; longitudinal steel D16/D19/D22/D25 × 1-6 bars; stirrups D10/D12/D13, 2 legs. Checks: shear (simplified Vc row (a), φVn ≥ Vu, Vs ≤ 0.66·√f'c·b·d, Av ≥ Av,min §9.6.3.3, 100 ≤ s ≤ s_max §9.7.6.2.2), flexure (φMn ≥ Mu via flex_capacity, A_s ≥ As,min §9.6.1.2). Objective: minimum total cost per metre (concrete + longitudinal steel + stirrup steel; placeholder unit rates, configurable). Use this tool instead of shear_capacity/flex_capacity when the question asks to design/size/section a beam, pick bars, or find the cheapest/most economical beam for given Vu and Mu — never iterate candidate sections yourself, one call returns the optimum.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "V_u": {"type": "number", "description": "Factored shear demand at the critical section (kN)", "exclusiveMinimum": 0},
+      "M_u": {"type": "number", "description": "Factored moment demand (kN·m); required — pass 0 for a flexurally trivial demand", "minimum": 0},
+      "max_b": {"type": "number", "description": "Maximum allowed beam width b (mm); grid iterates 250 → max_b step 50", "exclusiveMinimum": 0},
+      "max_h": {"type": "number", "description": "Maximum allowed beam depth h (mm); grid iterates 350 → max_h step 50", "exclusiveMinimum": 0},
+      "cover": {"type": "number", "description": "Clear cover to the stirrup (mm); d = h − cover − φ_long/2, stirrup diameter folded into the cover margin", "exclusiveMinimum": 0, "default": 40},
+      "f_yt": {"type": "number", "description": "Stirrup yield strength (MPa)", "exclusiveMinimum": 0, "default": 420},
+      "f_y": {"type": "number", "description": "Longitudinal steel yield strength (MPa)", "exclusiveMinimum": 0, "default": 420},
+      "f_c_list": {"type": "array", "items": {"type": "number"}, "description": "Concrete grades to search (MPa); default [20, 25, 30, 35, 40]", "default": [20, 25, 30, 35, 40]},
+      "rate_conc": {"type": "object", "description": "Concrete unit costs $/m³ keyed by f'c grade; default {20:120, 25:125, 30:130, 35:135, 40:140} (placeholder rates, not real prices); missing grades fall back to the defaults", "default": {"20": 120, "25": 125, "30": 130, "35": 135, "40": 140}},
+      "rate_steel": {"type": "number", "description": "Steel unit cost $/kg (placeholder, not a real price)", "exclusiveMinimum": 0, "default": 1.2}
+    },
+    "required": ["V_u", "M_u", "max_b", "max_h"],
+    "additionalProperties": false
+  },
+  "output": {
+    "unit": "design dict (b, h, d, f'c, bars, spacing, capacities, cost)",
+    "basis": "ACI 318M-19: shear §22.5.5.1(a) + §22.5.1.2 + §9.6.3.3 + §9.7.6.2.2 (φ=0.75 §21.2.1); flexure §22.2.2.1 + Table 21.2.2; A_s,min §9.6.1.2; cost per metre at placeholder rates"
+  }
+}

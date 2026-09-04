@@ -12,18 +12,18 @@ A single Flask server on `:5000` serves everything — two browser-style tabs:
   item-by-item (tables, equations, text), accept / edit / reject / skip, and
   export verified JSON. Draw a box on the page to OCR just that region.
 - **Chat** — multi-turn sessions against a knowledge base (hybrid RAG,
-  top_k=3, per-session KB selector + 3 ACI beam calculation tools
-  (shear/flexure). Answers and
+  top_k=3, per-session KB selector + 4 ACI beam calculation tools
+  (shear/flexure/design). Answers and
   messages render **markdown** (tables, bold, headers, lists) **and LaTeX**;
   every reply is tagged with the KB it used (`via KB: <name>` / `no KB`).
   Developer mode shows the retrieval / reasoning / tool-call trace.
 
 Both pages share a top bar with the **model control**: a chip showing which
 model is loaded plus a dropdown of the GGUF models/quants actually cached on
-disk — **one entry per installed quant** (e.g. `granite-4.1-8b (UD-Q6_K_XL)`,
+disk — **one entry per installed quant** (e.g. `granite-4.2-8b (Q6_K)`,
 `GLM-OCR (Q8_0)`) — and a Load button. The backend holds one resident model
 at a time, so a swap is always unload-before-load with a progress toast. The
-two defaults are GLM-OCR for OCR and granite (pinned to the `UD-Q6_K_XL`
+two defaults are GLM-OCR for OCR and granite (pinned to the `Q6_K`
 quant) for chat; any cached model/quant can be picked.
 
 Knowledge bases (Unsloth RAG) can be listed / created / renamed / deleted and
@@ -37,10 +37,10 @@ fed verified items from the OCR tab (one doc or all).
 - `UNSLOTH_API_KEY` in `.env.local` (see below)
 - The models you want to use available to Unsloth (installed via the Unsloth
   UI; defaults that the app wires up: `ggml-org/GLM-OCR-GGUF` for OCR,
-  `unsloth/granite-4.1-8b-GGUF` pinned to the **`UD-Q6_K_XL`** quant
-  (`config.CHAT_GGUF_VARIANT`) for chat — the backend's default quant for that
-  repo is `UD-Q4_K_XL`, which is not cached and would trigger a slow
-  re-download, so the cached quant is pinned explicitly; the dropdown lists
+  `ibm-granite/granite-4.2-8b-GGUF` pinned to the **`Q6_K`** quant
+  (`config.CHAT_GGUF_VARIANT`) for chat — the quant is passed as the load
+  endpoint's `gguf_variant` field (a `:Q6_K` suffix inside `model_path` is
+  rejected as a literal repo id); the dropdown lists
   whatever is actually cached on disk, one entry per quant)
 
 ```bash
@@ -74,11 +74,11 @@ Open <http://127.0.0.1:5000>.
 
 ```bash
 python3 test_itemizer.py                 # 73 itemizer assertions
-python3 functions/test_shear_tools.py    # 19 beam tool checks
+python3 functions/test_shear_tools.py    # 28 beam tool checks
 python3 orchestrator.py --selftest       # chat loop trace checks (offline)
 python3 rag_uploader.py --selftest       # KB render checks (offline)
 python3 models.py --selftest             # model mgmt wiring (offline)
-python3 smoke_test.py                    # 219 end-to-end route checks (no
+python3 smoke_test.py                    # 233 end-to-end route checks (no
                                               # live OCR)
 ```
 
@@ -89,7 +89,7 @@ python3 smoke_test.py                    # 219 end-to-end route checks (no
 - `rag_uploader.py` — verified JSON → Unsloth RAG KB (render + upload)
 - `orchestrator.py` — RAG + tool-calling chat engine (CLI + importable by app)
 - `models.py` — Unsloth model list (cached disk, per-quant) / load / unload / status
-- `functions/` — ACI 318M-19 beam shear/flexure tools (`beam_calc.py`,
+- `functions/` — ACI 318M-19 beam shear/flexure/design tools (`beam_calc.py`,
   schema-driven `wrapper.py`)
 - `schemas/` — OpenAI function-calling tool schemas
 - `templates/` — `_header.html` (tabs + per-quant model dropdown), `index.html` (OCR),

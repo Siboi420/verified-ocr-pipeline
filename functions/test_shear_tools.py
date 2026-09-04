@@ -244,6 +244,206 @@ def t_wrapper_h_path():
     near(flex["value"]["phiM_n_kNm"], 282.471, 1e-2, "wrapper h-path flex phiM_n")
 
 
+# --- 5. s_max switches at the 0.33·√f'c·b·d threshold; Vs cap (§22.5.1.2) --
+def _row_limits(row, v_u):
+    """Recompute the design rules a row must satisfy, for hand cross-checks."""
+    v_c = row["V_c_kN"]
+    v_s_req = v_u / 0.75 - v_c
+    cap33 = 0.33 * math.sqrt(row["f_c"]) * row["b"] * row["d"] / 1000
+    cap66 = 0.66 * math.sqrt(row["f_c"]) * row["b"] * row["d"] / 1000
+    s_max = min(row["d"] / 2, 600) if v_s_req <= cap33 else min(row["d"] / 4, 300)
+    return v_s_req, cap66, s_max
+
+
+def t_design_pure_shear():
+    """V_u=50, M_u=0, max 400×700: cheapest feasible is 250×350×20, D19×1.
+
+    Hand-verified: at f'c=20, V_c = 57.1 kN, so V_s,req = 66.7−57.1 = 9.6 kN
+    > 0 — the demand spacing exceeds s_max, so the stirrup picker clamps to
+    s_max = d/2 = 150.25 (D10 @ 150.25 gives Vs = 131.9 ≫ 9.6). That clamp
+    (2026-10-08 bug fix) is exactly what makes the cheaper f'c=20 grade
+    feasible; f'c=30 also works (cost 22.69) but 20 wins at 21.84 < the
+    previously-verified b=300,d=500,f'c=30 class (~37.6).
+    """
+    out = beam_calc.design_beam(V_u=50, M_u=0, max_b=400, max_h=700)
+    assert out["feasible"], out
+    assert out["reason"] is None
+    opt = out["optimum"]
+    assert opt["b"] == 250 and opt["h"] == 350, opt
+    assert opt["f_c"] == 20, opt
+    assert opt["long_bar"] == "D19 × 1", opt
+    assert opt["phiV_n_kN"] >= 50 - 1e-6, opt  # φVn ≥ Vu
+    assert opt["phiM_n_kNm"] >= 0, opt
+    assert opt["utilization"] <= 1.0 + 1e-6, opt
+    near(opt["cost"], 21.84, 0.5, "pure-shear optimum cost")
+    # stirrup-clamp regression guard: V_s,req > 0 but small, s == s_max
+    assert opt["s"] == opt["s_max"] == opt["d"] / 2, opt
+    assert opt["V_s_kN"] > 0, "clamped min stirrups still contribute Vs"
+    # strictly cheaper than the previously-verified b=300,d=500,f'c=30
+    # class design (concrete 300×550 + D19×3 + D10@250 ≈ 37.6 $/m)
+    assert opt["cost"] < 30, opt
+    assert len(out["ranked"]) <= 5
+
+
+def t_design_min_stirrup():
+    """Min-stirrup path obeys Av ≥ Av,min·s/1000 (Av,min per §9.6.3.3)."""
+    out = beam_calc.design_beam(V_u=50, M_u=0, max_b=400, max_h=700)
+    opt = out["optimum"]
+    av_min = beam_calc.min_shear_reinf(opt["b"], opt["f_c"], 420)
+    assert opt["A_v_mm2"] >= av_min * opt["s"] / 1000 - 1e-6, opt
+    assert opt["V_s_kN"] > 0, "min stirrups still contribute Vs"
+
+
+def t_design_flex_gate():
+    """φMn ≥ Mu and A_s ≥ As,min bind; 250×350 rejected for M_u=200.
+
+    Hand-verified: at 250×350 the strongest combo (f'c=40, D25×6) reaches
+    only φMn ≈ 186 kN·m < 200, so no row may carry that section. The search
+    chooses 250×550×20 D16×6: d=502, a=119.15, ε_t=0.0077→φ=0.9,
+    M_n=224.1 → φMn=201.7 ≥ 200; deep + f'c=20 (cheapest concrete) beats
+    shallower high-grade options.
+    """
+    out = beam_calc.design_beam(V_u=50, M_u=200, max_b=400, max_h=700)
+    assert out["feasible"], out
+    for row in out["ranked"]:
+        assert row["phiM_n_kNm"] >= 200 - 1e-6, row
+        assert row["phiV_n_kN"] >= 50 - 1e-6, row
+        assert not (row["b"] == 250 and row["h"] == 350), row
+        as_min = max(0.25 * math.sqrt(row["f_c"]) / 420, 1.4 / 420) * row["b"] * row["d"]
+        assert row["A_s_mm2"] >= as_min - 1e-6, row
+    opt = out["optimum"]
+    assert opt["b"] == 250 and opt["h"] == 550, opt
+    assert opt["f_c"] == 20 and opt["long_bar"] == "D16 × 6", opt
+    near(opt["phiM_n_kNm"], 201.7, 0.5, "M_u=200 optimum φMn")
+    near(opt["cost"], 35.4, 0.5, "M_u=200 optimum cost")
+    cheap = beam_calc.design_beam(V_u=50, M_u=0, max_b=400, max_h=700)
+    assert opt["cost"] > cheap["optimum"]["cost"], \
+        "flexure demand must cost more than pure shear"
+
+
+def t_design_d_formula():
+    """d = h − cover − φ_long/2 (cover 40 default; D19 h=300 → 250.5)."""
+    out = beam_calc.design_beam(V_u=50, M_u=200, max_b=400, max_h=700)
+    for row in out["ranked"]:
+        assert row["d"] == row["h"] - 40 - row["phi_long"] / 2, row
+    # custom cover threaded through
+    out2 = beam_calc.design_beam(V_u=50, M_u=0, max_b=300, max_h=500, cover=50)
+    for row in out2["ranked"]:
+        assert row["d"] == row["h"] - 50 - row["phi_long"] / 2, row
+    # exact plan example
+    assert 350 - 40 - 19 / 2 == 300.5
+
+
+def t_design_shear_limits():
+    """Vs ≤ 0.66·√f'c·b·d rejected; s in [100, s_max]; s_max switches."""
+    for kwargs in [
+        {"V_u": 50, "M_u": 0, "max_b": 400, "max_h": 700},
+        {"V_u": 50, "M_u": 200, "max_b": 400, "max_h": 700},
+    ]:
+        out = beam_calc.design_beam(**kwargs)
+        for row in out["ranked"]:
+            v_s_req, cap66, expect_s_max = _row_limits(row, kwargs["V_u"])
+            assert row["V_s_kN"] <= cap66 + 1e-6, row
+            assert row["s_max"] == expect_s_max, row
+            assert row["s"] >= 100 - 1e-6, row
+            assert row["s"] <= row["s_max"] + 1e-6, row
+            av_min = beam_calc.min_shear_reinf(row["b"], row["f_c"], 420)
+            assert row["A_v_mm2"] >= av_min * row["s"] / 1000 - 1e-6, row
+    # V_s,req > 0.66·√f'c·b·d everywhere inside 250×350 -> no feasible design
+    out = beam_calc.design_beam(V_u=300, M_u=50, max_b=250, max_h=350)
+    assert not out["feasible"], out
+    assert out["ranked"] == []
+
+
+def t_design_bounds():
+    """Grid respects max_b/max_h; step 50; b never exceeds max_b."""
+    out = beam_calc.design_beam(V_u=50, M_u=0, max_b=300, max_h=500)
+    assert out["feasible"], out
+    for row in out["ranked"]:
+        assert row["b"] in (250, 300), row
+        assert row["h"] in (350, 400, 450, 500), row
+    out2 = beam_calc.design_beam(V_u=50, M_u=0, max_b=385, max_h=380)
+    assert out2["feasible"], out2
+    for row in out2["ranked"]:
+        assert row["b"] in (250, 300, 350) and row["b"] <= 385, row
+        assert row["h"] == 350 and row["h"] <= 380, row
+
+
+def t_design_infeasible():
+    """Huge demands -> feasible False + reason, never a crash."""
+    out = beam_calc.design_beam(V_u=50, M_u=900, max_b=400, max_h=700)
+    assert not out["feasible"], out
+    assert out["ranked"] == [] and out["optimum"] is None
+    assert "no feasible" in out["reason"].lower()
+    out2 = beam_calc.design_beam(V_u=50, M_u=0, max_b=200, max_h=500)
+    assert not out2["feasible"] and "no section" in out2["reason"], out2
+
+
+def t_design_ranking():
+    """ranked sorted by min total cost; optimum == ranked[0]; deterministic."""
+    out = beam_calc.design_beam(V_u=50, M_u=200, max_b=400, max_h=700)
+    costs = [row["cost"] for row in out["ranked"]]
+    assert costs == sorted(costs), costs
+    assert out["optimum"] == out["ranked"][0]
+    again = beam_calc.design_beam(V_u=50, M_u=200, max_b=400, max_h=700)
+    assert again == out, "deterministic"
+    for row in out["ranked"]:
+        assert row["cost"] > 0
+        near(row["cost"],
+             row["cost_concrete"] + row["cost_long_steel"]
+             + row["cost_stirrup_steel"], 1e-9, "cost breakdown sum")
+
+
+def t_design_wrapper():
+    """Wrapper: design_beam registered, arrays/objects validated, errors."""
+    out = wrapper.call_tool("design_beam", V_u=50, M_u=0, max_b=400, max_h=700)
+    assert isinstance(out["value"], dict) and out["value"]["feasible"], out
+    assert 0 < len(out["value"]["ranked"]) <= 5
+    assert "design" in out["unit"]
+    assert "9.6.3.3" in out["basis"] and "22.5.5.1" in out["basis"]
+
+    custom = wrapper.call_tool(
+        "design_beam", V_u=50, M_u=0, max_b=300, max_h=500,
+        f_c_list=[25, 40], rate_conc={"25": 99, "40": 199}, rate_steel=3.0,
+    )
+    assert custom["value"]["feasible"], custom
+    opt = custom["value"]["optimum"]
+    assert opt["f_c"] in (25, 40), opt  # custom grade list honored
+    # string-key rate_conc must ACTUALLY apply (regression: keys were silently
+    # ignored and the default rate used; 2026-10-08). cost_concrete =
+    # rate[grade]·b·h/1e6 exactly.
+    expected = {25: 99, 40: 199}[opt["f_c"]] * opt["b"] * opt["h"] / 1e6
+    near(opt["cost_concrete"], expected, 1e-9, "custom rate_conc applied")
+    # non-numeric grade key -> loud ValueError, not a crash
+    try:
+        wrapper.call_tool("design_beam", V_u=50, M_u=0, max_b=300, max_h=500,
+                          rate_conc={"high": 99})
+    except ValueError as exc:
+        assert "numeric" in str(exc), exc
+    else:
+        raise AssertionError("design_beam rate_conc non-numeric key: expected ValueError")
+
+    expect_value_error("design_beam", {"V_u": 50, "M_u": 0, "max_b": 400,
+                                       "max_h": 700, "f_c_list": "nope"},
+                       "array")
+    expect_value_error("design_beam", {"V_u": 50, "M_u": 0, "max_b": 400,
+                                       "max_h": 700, "rate_conc": [1, 2]},
+                       "object")
+    expect_value_error("design_beam", {"V_u": 50, "M_u": 0, "max_b": 400,
+                                       "max_h": 700, "f_c_list": [1, "x"]},
+                       "finite")
+    expect_value_error("design_beam", {"V_u": 50, "M_u": 0, "max_b": 400,
+                                       "max_h": 700, "bogus": 1},
+                       "unknown")
+    # direct call guards: non-positive Vu
+    try:
+        beam_calc.design_beam(V_u=0, M_u=0, max_b=400, max_h=700)
+    except ValueError as exc:
+        assert "V_u" in str(exc), exc
+    else:
+        raise AssertionError("design_beam(V_u=0): expected ValueError")
+
+
 TESTS = [
     t_min_shear,
     t_shear_simplified,
@@ -264,6 +464,15 @@ TESTS = [
     t_row_c_partial_stirrups,
     t_no_stirrups_no_as_row_a,
     t_wrapper_h_path,
+    t_design_pure_shear,
+    t_design_min_stirrup,
+    t_design_flex_gate,
+    t_design_d_formula,
+    t_design_shear_limits,
+    t_design_bounds,
+    t_design_infeasible,
+    t_design_ranking,
+    t_design_wrapper,
 ]
 
 if __name__ == "__main__":

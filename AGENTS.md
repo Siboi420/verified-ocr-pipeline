@@ -68,8 +68,9 @@ has its own AGENTS.md). This app is the human-review step feeding that research.
   `/v1/chat/completions`. Auth via `Authorization: Bearer <UNSLOTH_API_KEY>`.
   - OCR model: `ggml-org/GLM-OCR-GGUF` (Q8_0 as of last swap). Loaded via:
     `POST /api/inference/load {"model_path":"ggml-org/GLM-OCR-GGUF","force_reload":true}`
-  - **Chat model**: `unsloth/granite-4.1-8b-GGUF` (`config.CHAT_MODEL`; the old Qwen
-    3.8 constant is gone). GGUF download/reload is the user's step — our code only
+  - **Chat model**: `ibm-granite/granite-4.2-8b-GGUF` (`config.CHAT_MODEL`; the
+    old Qwen 3.8 / granite-4.1 constants are gone). GGUF download/reload is the
+    user's step — our code only
     calls load/unload. Loaded at `context_length 32768` (`config.CHAT_MAX_SEQ_LENGTH`;
     Qwen needed that override — backend default was 17408). The chat engine caps
     `max_tokens` at 12000.
@@ -317,8 +318,8 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   and drops empty per-model entries (that's the "clear override" action).
   Model matching: exact key, or a key's base name (trailing `-GGUF` stripped)
   inside the model path — a resolved snapshot path like
-  `granite-4.1-8b-UD-Q6_K_XL.gguf` matches the repo-id key
-  `unsloth/granite-4.1-8b-GGUF` (same suffix approach as the model bar).
+  `granite-4.2-8b-Q6_K.gguf` matches the repo-id key
+  `ibm-granite/granite-4.2-8b-GGUF` (same suffix approach as the model bar).
   `--selftest` covers defaults/global/per-model override + snapshot-path
   matching + sanitize (incl. NaN/Inf/garbage rejection). Chat generation
   params only; RAG retrieval `top_k=3` and oCR sampling are untouched.
@@ -332,7 +333,7 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   is the source of truth (the `/api/models/local` registry lists empty/
   half-installed repos with no weights) and each cached repo contributes ONE
   entry per installed quant, parsed from the snapshot GGUF filenames
-  (`granite-4.1-8b-UD-Q6_K_XL.gguf` → `granite-4.1-8b (UD-Q6_K_XL)`;
+  (`granite-4.2-8b-Q6_K.gguf` → `granite-4.2-8b (Q6_K)`;
   `mmproj-*` vision-projector files skipped), so several quants of one model
   are separately selectable; `unload(model_path, force=True)` posts to
   `/api/inference/unload` with `force_cancel_active:true` (kills
@@ -349,12 +350,13 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   status (~2s, up to 120s) until the target reports loaded — the backend may
   resolve a hub id to a local snapshot path, so readiness matches by GGUF
   filename suffix.
-  **GGUF-variant foot-gun (verified live 2026-09-03):** the backend's default
-  variant for `unsloth/granite-4.1-8b-GGUF` is `UD-Q4_K_XL`, which is NOT
-  cached — loading the bare repo id triggers a multi-GB HTTP re-download
+  **GGUF-variant foot-gun (granite-4.1, verbatim from the live 2026-09-03
+  incident):** on the OLD `unsloth/granite-4.1-8b-GGUF` the backend's default
+  variant was `UD-Q4_K_XL`, which was NOT
+  cached — loading the bare repo id triggered a multi-GB HTTP re-download
   (xet transport stalls, then a forced clean re-download; the model stays
   `partial: true` and slow), which is the "chat takes way too long" symptom.
-  The cached quant is `UD-Q6_K_XL` (7.9 GB, full snapshot under
+  The cached quant was `UD-Q6_K_XL` (7.9 GB, full snapshot under
   `~/.cache/huggingface/hub/models--unsloth--granite-4.1-8b-GGUF/`). The
   variant is passed ONLY via the `gguf_variant` field of `POST
   /api/inference/load` — the backend REJECTS a `:UD-Q6_K_XL` suffix inside
@@ -364,34 +366,59 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   `display_name "granite-4.1-8b-GGUF (UD-Q6_K_XL)"`; `/api/models/local`
   then shows granite as `partial: false`. The stale `*.incomplete` Q4 blob
   (hundreds of MB) is harmless; the backend deletes it lazily.
+  **granite-4.2 now (verified on disk + resident):** `config.CHAT_MODEL` =
+  `ibm-granite/granite-4.2-8b-GGUF`, pinned to its single cached quant
+  `Q6_K` (`granite-4.2-8b-Q6_K.gguf`, full snapshot under
+  `~/.cache/huggingface/hub/models--ibm-granite--granite-4.2-8b-GGUF/`) via
+  `config.CHAT_GGUF_VARIANT = "Q6_K"` — same rule applies, the suffix goes in
+  `gguf_variant`, never `model_path`.
   No CLI action besides `--selftest`.
 - `orchestrator.py` — RAG + tool-calling Q&A **engine + CLI only, no HTTP server**
   (stdlib + urllib, no deps). Question from `--question` or stdin (both empty →
   usage, exit 2; missing `UNSLOTH_API_KEY` → error, exit 1; `--max-tokens` default
   12000 — capped so a reasoning model can't burn the whole window in COT and stop
   empty; the system prompt also tells it to answer directly without a reasoning
-  preamble). `run_loop(messages, tools, max_tokens)` → `(answer, trace)` (trace =
+  preamble and, since 2026-10-08, to call a tool only when a number needs
+  computing and to stop + answer immediately once all tool results are back
+  (no further tool calls, no re-runs, no repetition). `run_loop(messages, tools, max_tokens, thinking=False)` →
+  `(answer, trace)` (trace =
   ordered `{"kind":...}` steps: `reasoning` whenever the backend emits
   `reasoning_content`, `message`, `tool_call` (name + raw args), `tool_result`
   (wrapper result or `{error}`), final `answer`); `answer_turn(user_turn, history,
   kb_id, max_tokens=None)` → `(answer, trace)` with a `retrieval` step prepended when
   `kb_id` is set (`None` → no retrieval; `max_tokens=None` → the resolved
-  profile's cap, applied in `chat()`); `chat(messages, tools, max_tokens=None)`
+  profile's cap, applied in `chat()`); `chat(messages, tools, max_tokens=None,
+  thinking=False)`
   resolves the loaded model's generation profile once via
   `profiles.resolve(_loaded_model())` and sends `temperature`, `repeat_penalty`,
-  and any set `top_k`/`top_p`/`min_p` (None params omitted from the payload);
+  any set `top_k`/`top_p`/`min_p` (None params omitted from the payload),
+  **and `enable_thinking: <thinking>` EXPLICITLY on every request** — the GGUF
+  backend loads with thinking on (Studio-managed `chat_template_kwargs`), so an
+  explicit per-query False is the only way to run the fast path; `answer_turn`
+  routes per query: ambiguous/judgment phrasing (`should`/`recommend`/
+  `dimension`/`assume`/`if`/`or` keywords — `_AMBIGUOUS_RE`) → first pass with
+  `thinking=True`; straightforward parameter extraction (e.g. the Av,min
+  question, no keyword) → first pass `thinking=False`; a failed fast pass
+  escalates to `thinking=True` ONCE (`_wants_retry`: empty answer, a tool-call
+  error surfaced to the model, or a calc-style question — `capacity`/`shear`/
+  `moment`/`flex`/`Ast`/`Av`/`kN`… — answered without any tool call); the retry
+  restarts from the seed messages (fresh `_question_messages`), retrieval runs
+  once; the forwarding keyword heuristic is marked `ponytail:` (upgrade path:
+  a real classifier or retry-only policy if it misfires);
   the `TEMPERATURE` constant is gone (moved into `profiles.DEFAULTS`);
   `answer_question` (CLI) resolves
   `DEFAULT_KB_NAME = "Verified OCR"` by NAME at runtime (`default_kb_id()`, creates
   if missing) so rename/delete of KBs never strands the CLI on a stale id.
   Retrieves `top_k=3` hybrid chunks via `POST /api/rag/search` (`text` field),
   globs `schemas/*.json` into OpenAI function tools, loops (≤8 iters) against
-  `config.CHAT_MODEL` (`unsloth/granite-4.1-8b-GGUF`): tool calls run through
+  `config.CHAT_MODEL` (`ibm-granite/granite-4.2-8b-GGUF`): tool calls run through
   `functions/wrapper.py:call_tool()`; wrapper `ValueError`s are serialized
   `{"error": …}` back to the model, never crash the loop; final non-tool message
   is the answer, exit 0; iteration cap → exit 1. Tool-call parsing handles both
   the native `message.tool_calls` shape and a `<tool_call>`-marker fallback
-  (verified native-only 2026-09-02). **Repetition guard (2026-09-03):** the
+  (native-only re-verified live on granite-4.2 2026-09-26: the backend
+  converts its chat-template `<tool_call><function=…><parameter=…>` XML into
+  native `message.tool_calls`, so no XML-parsing branch is needed). **Repetition guard (2026-09-03):** the
   final answer passes through `_truncate_repetition` — a run of ≥5 identical
   non-trivial lines (≥40 chars) is cut at the first repeat and replaced with a
   truncation note, so the 8B-model degenerate-loop failure (seen in session
@@ -413,10 +440,12 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   payload-shape assert (stubbed `_api` → `repeat_penalty == 1.1`).
 - `config.py` — `API_BASE` (default `http://localhost:8888`), `API_KEY` (env-only),
   `MODEL = "ggml-org/GLM-OCR-GGUF"` (OCR), `CHAT_MODEL =
-  "unsloth/granite-4.1-8b-GGUF"` (chat), `CHAT_GGUF_VARIANT =
-  "UD-Q6_K_XL"` (pins the cached quant — see the models-matching
-  foot-gun under `models.py`; the backend's default `UD-Q4_K_XL` is not
-  cached and stalls on download), `CHAT_MAX_SEQ_LENGTH = 32768` (explicit
+  "ibm-granite/granite-4.2-8b-GGUF"` (chat), `CHAT_GGUF_VARIANT =
+  "Q6_K"` (pins the single cached quant — granite-4.2's
+  only installed quant; the suffix goes in the load's `gguf_variant` field,
+  never `model_path` — see the models-matching
+  foot-gun under `models.py` for how the old granite-4.1
+  `UD-Q4_K_XL` default stalled on download), `CHAT_MAX_SEQ_LENGTH = 32768` (explicit
   context-length override, same as Qwen needed; None → omit the load field),
   `OCR_MAX_SEQ_LENGTH = None` (backend default), `UPLOAD_DIR`.
 - `ocr_engine.py` — `pdf_to_images(dpi=200, page_range=None)` (accepts a single
@@ -596,9 +625,10 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
 - `validation/` — `pending/` (docs), `verified/<doc_id>/`, `rejected/<doc_id>/` (per-item JSON), `uploads/<doc_id>/` (pdf, md, page PNGs).
 - `functions/beam_calc.py` — self-contained, **stdlib-only** (math; numpy/matplotlib/argparse/yaml dropped) ACI 318M-19 beam shear/flexure calcs extracted from the BeamValidation repo
   (github.com/Siboi420/BeamValidation, commit `668be3670dc8ba065f215a0ca1b59eb9e3bd8ca5`, `scripts/RCBeam_moment_capacity.py`). Public: `min_shear_reinf(b_w, f_c, f_yt)` → Av,min per metre (mm²/m, §9.6.3.3, `max(0.062·√f'c·b_w/f_yt, 0.35·b_w/f_yt)·1000`); `shear_capacity(b, d=None, f_c=None, A_v=0, s=0, f_yw=0, A_s=None, V_u=None, M_u=None, h=None, cover_cg=None)` → wrapped `compute_aci_shear` — effective depth is **d, or h with cover_cg (d = h − cover_cg), never both (loud XOR ValueError), rejected cover_cg ≥ h**, Vc rows: simplified `§22.5.5.1(a)`; detailed `(b)` only when stirrups ≥ Av,min AND A_s+V_u+M_u given, capped `§22.5.8.5.3`-adjacent `0.29·λ·√f'c·b·d`; **size-effect `(c)` when stirrups < Av,min (or absent) and A_s given: `λ_s = min(√(2/(1+d/250)), 1)` (§22.5.5.1.3), `V_c = 0.66·λ_s·λ·ρ_w^⅓·√f'c·b·d`**; Av,min comparison via `min_shear_reinf(b, f_c, f_yw)·s/1000` (reused, not duplicated); stirrups adequate ⇔ that inequality; φ_v=0.75; returns `Vc_criterion` ("row (a)"|"row (b)"|"row (c)") + `lambda_s` on top of the numeric keys; `flex_capacity(b, d=None, A_s=None, f_c=None, f_yl=None, h=None, cover_cg=None)` → wrapped `compute_aci_flexure` (stress block §22.2.2.1, β₁ §22.2.2.4.3, φ Table 21.2.2), same d/h XOR path. Constants EPSILON_CU=0.003, Es=2e5, λ=1.0.
-- `functions/wrapper.py` — schema-driven dispatcher (`call_tool(name, **kwargs)` → `{value, unit, basis}`; registry maps the 3 tool names; loads the matching `schemas/<name>.json` resolved via `__file__`; validates required fields, unknown keys, numeric type/finiteness, exclusiveMinimum/minimum bounds; raises `ValueError` with a clear message). Schema read/parse errors (missing file, bad JSON) are wrapped as `ValueError`.
-- `functions/test_shear_tools.py` — plain asserts + PASS/FAIL (no framework), 19 checks over all three tools + wrapper shape/unit/basis + d/h resolution + validation error paths (missing/negative/non-numeric/unknown-key/unknown-tool); exits non-zero on failure. Loads sibling modules via `importlib` so it runs from any cwd.
-- `schemas/min_shear_reinf.json`, `schemas/shear_capacity.json`, `schemas/flex_capacity.json` — OpenAI function-calling shape (`name`/`description`/`parameters` with `type`/`properties`/`required`/`additionalProperties:false`) plus an `output` block carrying `unit` + `basis` (returned by wrapper). `d` is **optional** on the two capacity schemas (default null); `h` + `cover_cg` are optional fields resolving to d; capacity `description`s carry the few-shot line ("a 200x300 beam → pass b=200 and (d, or h=300 with cover_cg)"), `min_shear_reinf`'s a b_w-only variant and its `description` advertises the "minimum Ast" / "minimum shear reinforcement" / "minimum stirrup area" aliases (Av,min) so the model routes those phrasings to it; `shear_capacity` `basis` names row (c) + §22.5.5.1.3 λ_s.
+  `design_beam(V_u, M_u, max_b, max_h, cover=40, f_yt=420, f_y=420, f_c_list=None, rate_conc=None, rate_steel=1.2)` → **cheapest-feasible beam design** via a deterministic full-grid search (the LLM makes ONE call, never iterates): b in 250→max_b step 50 × h in 350→max_h step 50 × f'c in [20,25,30,35,40] × longitudinal D16/D19/D22/D25 × 1–6 bars × stirrups D10/D12/D13 (2 legs). d = h − cover − φ_long/2. Shear = simplified Vc row (a) 0.17·λ·√f'c·b·d (design intent — the row (b)/(c) variants in `shear_capacity` evaluate existing sections); V_s,req = V_u/0.75 − V_c; ≤0 → min stirrups at s_max, else s = A_v·f_yt·d/V_s,req; feasibility: φV_n ≥ V_u (auto by construction), V_s ≤ 0.66·√f'c·b·d (§22.5.1.2), 100 ≤ s ≤ s_max (§9.7.6.2.2: min(d/2,600) when V_s ≤ 0.33·√f'c·b·d else min(d/4,300)), A_v ≥ Av,min·s/1000 (folded in as the s ≤ A_v·1000/Av,min cap). Flexure = `flex_capacity` gate (φM_n ≥ M_u) plus A_s ≥ As,min §9.6.1.2 (checked here, not in `flex_capacity`). Objective = min total cost per metre = concrete (`rate_conc[f'c]·b·h/1e6`) + longitudinal steel (`rate_steel·ρ·A_s/1e6`) + stirrup steel (`rate_steel·ρ·A_v·perim/(s·1e6)`, perimeter ≈ 2(b−2c)+2(h−2c), ρ=7850 kg/m³). Returns `{"feasible", "reason", "optimum", "ranked" (top-5 by cost)}`; infeasible → `feasible:false` + reason, never raises. Unit rates are configurable **placeholders** (`DEFAULT_RATE_CONC` per grade, `DEFAULT_RATE_STEEL`), not real prices; `f_c_list`/`rate_conc` merge over defaults. `ponytail:` bar-fit/placement geometry in width b NOT checked; `ponytail:` the §9.6.3.1 no-stirrups exemption (V_u ≤ 0.5·φ·V_c) is folded into min stirrups — conservative, add if cost fidelity ever matters; `ponytail:` M_u required (shear-only sizing out of scope, pass 0).
+- `functions/wrapper.py` — schema-driven dispatcher (`call_tool(name, **kwargs)` → `{value, unit, basis}`; registry maps the 4 tool names; loads the matching `schemas/<name>.json` resolved via `__file__`; validates required fields, unknown keys, numeric type/finiteness, exclusiveMinimum/minimum bounds — plus light structural checks for `array`/`object` params (non-empty-list-of-finite-numbers `f_c_list`, finite-number-dict `rate_conc`); raises `ValueError` with a clear message). Schema read/parse errors (missing file, bad JSON) are wrapped as `ValueError`.
+- `functions/test_shear_tools.py` — plain asserts + PASS/FAIL (no framework), 28 checks over all four tools + wrapper shape/unit/basis + d/h resolution + validation error paths (missing/negative/non-numeric/unknown-key/unknown-tool) + the design_beam suite (see Tests section); exits non-zero on failure. Loads sibling modules via `importlib` so it runs from any cwd.
+- `schemas/min_shear_reinf.json`, `schemas/shear_capacity.json`, `schemas/flex_capacity.json`, `schemas/design_beam.json` — OpenAI function-calling shape (`name`/`description`/`parameters` with `type`/`properties`/`required`/`additionalProperties:false`) plus an `output` block carrying `unit` + `basis` (returned by wrapper). `d` is **optional** on the two capacity schemas (default null); `h` + `cover_cg` are optional fields resolving to d; capacity `description`s carry the few-shot line ("a 200x300 beam → pass b=200 and (d, or h=300 with cover_cg)"), `min_shear_reinf`'s a b_w-only variant and its `description` advertises the "minimum Ast" / "minimum shear reinforcement" / "minimum stirrup area" aliases (Av,min) so the model routes those phrasings to it; `shear_capacity` `basis` names row (c) + §22.5.5.1.3 λ_s. `design_beam.json` is the sizing tool: required `V_u`/`M_u`/`max_b`/`max_h`, optional `cover`/`f_yt`/`f_y`/`f_c_list`/`rate_conc`/`rate_steel`, description advertises "given Vu and Mu, size the beam within max_b × max_h" routing (use instead of shear/flex_capacity when the question asks to DESIGN/SIZE a beam).
 
 ## Current state (verified facts — don't contradict)
 
@@ -659,7 +689,7 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
 - **One server + model swap + KB/session routes (implemented 2026-09-03):** the
   Flask app on `:5000` serves OCR + chat (sessions + dev trace) + KB management +
   the model bar; `:5001` (orchestrator server) is gone. Chat model constant is
-  `unsloth/granite-4.1-8b-GGUF` (via `config.CHAT_MODEL`); the Qwen constant and
+  `ibm-granite/granite-4.2-8b-GGUF` (via `config.CHAT_MODEL`); the Qwen constant and
   the hardcoded `KB_ID` are gone (name-based resolution). Unsloth verbs verified
   against the live openapi: KB rename = **`PATCH`** `/api/rag/knowledge-bases/
   {kb_id}`, delete = DELETE, unload body **requires `model_path`** (empty/unknown
@@ -683,7 +713,7 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   (`GET /api/models/cached-gguf` — real disk cache; the `/api/models/local`
   registry lists empty/half-installed repos with no weights and is NOT
   consulted; `mmproj-*` skipped; verified live 2026-09-03 — sam3/gemma/qwen
-  stubs deleted, remaining: granite-4.1-8b (UD-Q6_K_XL), GLM-OCR (Q8_0),
+  stubs deleted, remaining: granite-4.2-8b (Q6_K), GLM-OCR (Q8_0),
   takes a literal model path (+ optional `variant` from the dropdown) with
   variant-aware "already loaded" matching.
   Smoke test now 233 checks.
@@ -699,6 +729,21 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   sections. `TEMPERATURE`/`MAX_CHAT_TOKENS` are gone (moved into
   `profiles.DEFAULTS`); `ocr_engine` sampling and RAG retrieval `top_k` are
   untouched.
+- **Per-query thinking toggle (implemented 2026-09-15):** `chat()` sends
+  `enable_thinking` EXPLICITLY on every request (the GGUF backend loads with
+  thinking on via Studio's `chat_template_kwargs`; an explicit False is the
+  only per-query way to run the fast path). `answer_turn` routes: ambiguous/
+  judgment phrasing (`_AMBIGUOUS_RE` keywords `should`/`recommend`/
+  `dimension`/`assume`/`if`/`or`) → `thinking=True` on first pass;
+  parameter-extraction questions (default) → `thinking=False`; a failed fast
+  pass escalates once to `thinking=True` (empty answer, tool-arg error
+  surfaced to the model, or a calc-style question — `capacity`/`shear`/
+  `moment`/`flex`/`Ast`/`Av`/`kN`… — answered with no tool call). Keyword
+  heuristic marked `ponytail:` (upgrade: real classifier or retry-only
+  policy). Live check (2026-09-15): `enable_thinking: false` accepted by
+  the :8888 backend (HTTP 200, no rejection); re-verified live on
+  granite-4.2 (2026-09-26): fast path → no `reasoning_content`, thinking
+  path → `reasoning` trace step + correct tool answer.
 - **Manual item ordering (implemented 2026-09-03):** every item carries
   `order` — document position by default, editable per page via `POST
   /item/<doc_id>/<item_id>/order` `{order: <finite number>}` (rounded to
@@ -717,7 +762,8 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   b_w=350, f_c=28, f_yt=420?" calls `min_shear_reinf` with those exact args and
   answers 291.7 mm²/m. `_truncate_repetition` remains as the safety net. No new
   tool (the `min_flex_steel` idea was dropped — YAGNI; `min_shear_reinf` covers
-  it); tool count stays 3.
+  it); tool count was 3 until the design_beam tool below.
+- **`design_beam` optimizer tool (implemented 2026-10-08, live-verified):** ONE tool that sizes a beam — given factored `V_u` (kN), `M_u` (kN·m) and section bounds `max_b`/`max_h` (mm), a deterministic full-grid search inside `beam_calc.design_beam` returns the cheapest feasible `{b, h, d, f'c, long_bar, stirrup_bar, s}` + top-5 ranked + reason. Tool count 3 → **4**. Offline checks in `test_shear_tools.py` (19 → **28 checks**): pure-shear `V_u=50` → `250×350×20, D19×1` @ ~21.8 $/m (strictly cheaper than the previously-verified b=300,d=500,f'c=30 class); `M_u=200` binds flexure (`250×350` rejected for every f'c; optimum `250×550×20, D16×6`); d-formula, Vs/spacing limits, bound iteration, infeasible-with-reason, cost-ranked determinism, wrapper array/object validation. **Two bugs found + fixed during the first live runs (2026-10-08):** (1) `rate_conc` grade keys arrive as JSON strings (`"20": 100`) and were silently **ignored** (`rates[f_c]` int lookup missed) — the custom concrete cost fell back to the default rate and the answer's cost came out wrong ($742.89 vs the true $736.59 at the same rates); now `int(k)`-normalized with a loud ValueError for non-numeric keys, and the test asserts the custom rate actually lands in `cost_concrete`; (2) `_pick_stirrups` **rejected** any combo whose exact demand spacing exceeded `s_max` — but small positive `V_s,req` is exactly where minimum stirrups at `s_max` already suffice (s_demand > s_max ⇔ Vs@max ≥ V_s,req) — so the search dropped feasible, cheaper designs and returned a sub-optimal optimum (e.g. it claimed the default-rates optimum was 300×550/D16×5 @ $40.70 when the true optimum after the fix is `250×600×20, D25×2` @ **$34.71**; b=250×600 was wrongly infeasible before). **Live re-verification (gemma-4-12B, 2026-10-08):** the custom-cost question (Vu=120, Mu=180, max 350×600, "concrete 100/m³, steel 50/kg") → one `design_beam` call with `rate_conc:{20:100,…,40:100}`, `rate_steel:50` (gemma also chose `f_y=400`, an accepted optional), tool optimum `250×600×25, D25×2, D10@274` @ **$711.08** (`cost_concrete=15.00` — the custom rate provably applied), answer reports it verbatim (~1 min wall, well under the granite loop times). **Live (granite-4.2, earlier same day):** the default-rates question converged in the ideal 2-generation shape (`message → tool_call → tool_result → message → answer`) in ~2 min wall (118.6s at ~4.5 tok/s on the 2080 Ti) after the system-prompt stop-condition; the ~16-min/8-pass 502 loop hasn't recurred, but it was stochastic model looping, so one sample proves convergence, not prevention; the structural bounds remain the 8-iteration cap → 502 + repeat_penalty + unload-with-force_cancel_active reset. `orchestrator._api` still has no HTTP timeout — a wedged backend hangs a /messages POST indefinitely (bit us twice 2026-10-08; fixed by the reset, not yet by code).
 - **Voice / AIRI roadmap (later):** docs-only this round (`docs/voice-roadmap.md`);
   no voice code or new deps. Target: browser mic → STT → chat session store →
   `orchestrator.answer_turn` → TTS → playback, with planned `POST /api/voice/stt`
@@ -779,7 +825,7 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
 ## Tests / verification
 
 - `python3 test_itemizer.py` — 73 itemizer assertions.
-- `python3 functions/test_shear_tools.py` — 19 hand-calc checks for the `functions/` shear/flexure tools (Av,min mm²/m, simplified Vc, row (c) size-effect Vc incl. λ_s + ρ_w, adequate-stirrup rows (a)/(b), partial stirrups → row (c) + V_s, d↔h/cover_cg equivalence for shear and flex, d-resolution errors (XOR/neither/cover≥h), row (a) fallback, wrapper shape + unit/basis incl. h-path, validation error paths); plain asserts + PASS/FAIL, exit non-zero on failure.
+- `python3 functions/test_shear_tools.py` — 28 hand-calc checks for the `functions/` shear/flexure tools (Av,min mm²/m, simplified Vc, row (c) size-effect Vc incl. λ_s + ρ_w, adequate-stirrup rows (a)/(b), partial stirrups → row (c) + V_s, d↔h/cover_cg equivalence for shear and flex, d-resolution errors (XOR/neither/cover≥h), row (a) fallback, wrapper shape + unit/basis incl. h-path, validation error paths; plus 9 `design_beam` checks: pure-shear optimum 250×350×20 D19×1 (with the stirrup-clamp regression guard: s == s_max == d/2 and Vs > 0) cheaper-or-equal to the b=300,d=500 class, min-stirrup path vs Av,min, flexure gate binds (φM_n ≥ M_u, A_s ≥ As,min, no 250×350 row at M_u=200, optimum 250×550×20 D16×6), d = h − cover − φ_long/2 (incl. custom cover), Vs ≤ 0.66·√f'c·b·d + s ∈ [100, s_max] + s_max switch, bound/step iteration (max_b=385 → b ≤ 385), infeasible → `[]` + reason (V_u=300 and M_u=900 cases), cost-ranked top-5 determinism, wrapper registration + array/object validation errors + string-key `rate_conc` applied (cost_concrete equals the custom rate·b·h/1e6) + non-numeric grade key → ValueError; plain asserts + PASS/FAIL, exit non-zero on failure.
 - `python3 smoke_test.py` — 233 end-to-end checks via Flask test client (no live OCR,
   no backend; `rag_uploader._api`, `models.current_model/unload/load/list_models`,
   and `orchestrator.answer_turn` stubbed where they'd hit :8888):
@@ -840,18 +886,25 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   NaN/Inf/garbage/fractional-int -> ValueError, empty per-model entry dropped,
   non-object sections rejected), and corrupt-file -> defaults never raise.
 - `python3 orchestrator.py --selftest` — offline PASS: schema glob yields exactly
-  the 3 tool names in the right shape, tool-call extraction parses both synthetic
+  the 4 tool names in the right shape (design_beam, flex_capacity, min_shear_reinf,
+  shear_capacity), tool-call extraction parses both synthetic
   native `tool_calls` and `<tool_call>`-marker payloads, round-trip/`_norm_args`
   shapes, and a `run_loop` trace-shape assert with `chat()` stubbed (expected
   step kinds/order `reasoning, message, tool_call, tool_result, reasoning,
   message, answer`, real wrapper call value 291.67) plus `_truncate_repetition`
   checks (8× repeated 60-char line truncated to prefix + note; clean text,
-  short lines, and 3× repeats pass through untouched) and two chat-payload
+  short lines, and 3× repeats pass through untouched) and chat-payload
   asserts with `_api` + `profiles.load_settings` stubbed (defaults:
   `temperature 0.2`, `repeat_penalty 1.1`, `max_tokens 12000`, no
   top_k/top_p/min_p keys when unset; override: global `temperature 0.7` +
   `top_k 33` and per-model `min_p 0.05` flow into the payload, unset
-  `repeat_penalty` keeps the default, `None` max_tokens -> profile default).
+  `repeat_penalty` keeps the default, `None` max_tokens -> profile default;
+  `enable_thinking` EXPLICIT per request — default chat() sends false,
+  explicit `thinking=True` sends true) and `answer_turn` routing/retry
+  decisions with `run_loop` stubbed (parameter-extraction question → fast
+  first pass then one escalation on an empty answer; ambiguous keyword
+  question → thinking on the FIRST pass, no retry; calc-style no-keyword
+  question answered without a tool call → fast then retry).
   No HTTP-handler block — the server is gone.
 - `python3 rag_uploader.py --selftest` — offline grouping/ordering/Unicode/empty-skip
   checks (unchanged but now with `_api` raising RuntimeError).

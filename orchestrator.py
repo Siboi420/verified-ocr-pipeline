@@ -2,7 +2,7 @@
 """RAG + tool-calling Q&A loop over the "Verified OCR" knowledge base.
 
 Question -> (optional) hybrid RAG retrieval (top_k=3) -> chat loop with
-unsloth/granite-4.1-8b-GGUF (config.CHAT_MODEL) + the 3 beam tool schemas.
+ibm-granite/granite-4.2-8b-GGUF (config.CHAT_MODEL) + the 3 beam tool schemas.
 When the model emits tool calls they are executed via
 functions/wrapper.py:call_tool() and the results (or validation errors) are
 fed back; the loop ends when the model answers without tool calls, or after
@@ -66,7 +66,10 @@ SYSTEM_PROMPT = (
     "are b x h. Capacity tools take effective depth d, or h plus `cover_cg` "
     "(d = h - cover_cg); never pass total height h as d. After the tool calls "
     "return their results, answer the user directly with the final value and its "
-    "basis - do not include a chain-of-thought / reasoning preamble. When the "
+    "basis - do not include a chain-of-thought / reasoning preamble. Call a "
+    "tool only when a number needs computing; once all needed tool results "
+    "are back, stop and write the final answer immediately - do not call "
+    "further tools, re-run a tool, or repeat yourself. When the "
     "user asks to break down, explain, or verify a previous tool result, re-run "
     "the tool with the same inputs instead of recomputing from memory. 'Ast', "
     "'minimum shear reinforcement', and 'minimum stirrup area' all mean Av,min - "
@@ -191,12 +194,14 @@ def tool_result(mode, call_id, result):
     return {"role": "tool", "content": f"<tool_response>\n{content}\n</tool_response>"}
 
 
-def chat(messages, tools, max_tokens=None):
+def chat(messages, tools, max_tokens=None, thinking=False):
     """One /v1/chat/completions round-trip against the loaded model's
     generation profile. max_tokens None -> the resolved profile's cap
     (profiles.DEFAULTS fallback). Sampling params that resolve to None
     (top_k/top_p/min_p unless set) are omitted from the payload so they
-    stay off."""
+    stay off. enable_thinking is sent EXPLICITLY every request: the GGUF
+    backend loads with thinking on (Studio-managed), and an explicit
+    False is the only way to run the fast path per query."""
     model = _loaded_model()
     p = profiles.resolve(model)
     body = {
@@ -204,6 +209,7 @@ def chat(messages, tools, max_tokens=None):
         "messages": messages,
         "tools": tools,
         "max_tokens": max_tokens or p["max_tokens"],
+        "enable_thinking": thinking,
     }
     for k in ("temperature", "top_k", "top_p", "min_p", "repeat_penalty"):
         if p[k] is not None:
@@ -232,15 +238,16 @@ def _truncate_repetition(text):
     return text
 
 
-def run_loop(messages, tools, max_tokens):
+def run_loop(messages, tools, max_tokens, thinking=False):
     """Drive the chat/tool loop; returns (answer, trace). trace is an ordered
     list of {"kind": ...} steps: "reasoning" (reasoning_content, when the
     backend emits it), "message" (assistant content), "tool_call"
     (name + raw arguments), "tool_result" (the wrapper result or {error}),
-    and a final "answer" step. Raises RuntimeError at the iteration cap."""
+    and a final "answer" step. Raises RuntimeError at the iteration cap.
+    thinking threads into every chat() call (per-request enable_thinking)."""
     trace = []
     for _ in range(MAX_ITERS):
-        message = chat(messages, tools, max_tokens)
+        message = chat(messages, tools, max_tokens, thinking)
         reasoning = message.get("reasoning_content")
         if reasoning:
             trace.append({"kind": "reasoning", "content": reasoning})
@@ -273,21 +280,33 @@ def run_loop(messages, tools, max_tokens):
     raise RuntimeError("reached iteration cap without a final answer")
 
 
-def answer_turn(user_turn, history, kb_id, max_tokens=None):
-    """One user turn in a session: (retrieval?) + chat loop.
+# Ambiguity keywords: questions phrased as design/judgment calls get the
+# thinking pass; straightforward parameter extraction runs the fast path.
+# ponytail: fixed keyword set, not a real classifier — if the heuristic
+# misfires, the fallback retry below still catches the fatal cases (a true
+# classifier is only worth it when echo-confirmed misses are frequent).
+_AMBIGUOUS_RE = re.compile(
+    r"\b(?:should|recommend|dimension|assume|if|or)\b",
+    re.IGNORECASE)
 
-    history: prior messages [{"role": "user"|"assistant", "content": …}].
-    kb_id: RAG KB to retrieve from; None = no retrieval (bare tools only).
-    max_tokens: explicit cap; None falls back to the resolved profile's
-    max_tokens (set in chat()).
-    Returns (answer, trace); the trace's first step (when kb_id is set) is
-    {"kind": "retrieval", "chunks": […]}."""
-    trace = []
-    context = "(no retrieved chunks)"
-    if kb_id:
-        chunks = retrieve(user_turn, kb_id)
-        trace.append({"kind": "retrieval", "chunks": chunks})
-        context = "\n\n".join(chunks) if chunks else context
+
+# Calculation-style questions must end in a tool call; a fast pass that
+# returns prose without one is suspect -> escalate.
+_CALC_STYLE_RE = re.compile(
+    r"\b(?:capacity|shear|moment|flex|Ast|Av|min_shear|reinf|kN)\b",
+    re.IGNORECASE)
+
+
+def _is_ambiguous(question):
+    """Design/judgment questions need thinking; straightforward parameter
+    extraction doesn't. Small keyword heuristic — see _AMBIGUOUS_RE note."""
+    return bool(_AMBIGUOUS_RE.search(question))
+
+
+def _question_messages(user_turn, history, context):
+    """system + history + the user turn with the retrieved context (fresh
+    list per call, so the retry restarts from the seed, not the failed
+    loop's appended messages)."""
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     for m in history:
         if m.get("role") in ("user", "assistant"):
@@ -296,7 +315,54 @@ def answer_turn(user_turn, history, kb_id, max_tokens=None):
         "role": "user",
         "content": f"{user_turn}\n\nContext:\n{context}",
     })
-    answer, steps = run_loop(messages, load_tools(), max_tokens)
+    return messages
+
+
+def _wants_retry(answer, steps, question):
+    """A non-thinking pass failed if the answer is empty, a tool call
+    errored (malformed args surfaced back to the model), or a
+    calculation-style question returned no tool call — escalate once."""
+    if not answer.strip():
+        return True
+    if any(
+        t["kind"] == "tool_result" and isinstance(t.get("result"), dict)
+        and t["result"].get("error")
+        for t in steps
+    ):
+        return True
+    if _CALC_STYLE_RE.search(question) and not any(t["kind"] == "tool_call" for t in steps):
+        return True
+    return False
+
+
+def answer_turn(user_turn, history, kb_id, max_tokens=None):
+    """One user turn in a session: (retrieval?) + chat loop.
+
+    history: prior messages [{"role": "user"|"assistant", "content": …}].
+    kb_id: RAG KB to retrieve from; None = no retrieval (bare tools only).
+    max_tokens: explicit cap; None falls back to the resolved profile's
+    max_tokens (set in chat()).
+
+    Thinking policy (per-query enable_thinking): ambiguous/judgment
+    questions think on the first pass; straightforward parameter extraction
+    runs the fast non-thinking path, escalating to thinking ONCE only when
+    the fast pass fails (empty answer, tool-arg error, or a calc question
+    answered without tools).
+    Returns (answer, trace); the trace's first step (when kb_id is set) is
+    {"kind": "retrieval", "chunks": […]}."""
+    trace = []
+    context = "(no retrieved chunks)"
+    if kb_id:
+        chunks = retrieve(user_turn, kb_id)
+        trace.append({"kind": "retrieval", "chunks": chunks})
+        context = "\n\n".join(chunks) if chunks else context
+    thinking = _is_ambiguous(user_turn)
+    answer, steps = run_loop(
+        _question_messages(user_turn, history, context), load_tools(), max_tokens, thinking)
+    if not thinking and _wants_retry(answer, steps, user_turn):
+        # one-shot escalation: the fast path failed, try once with thinking
+        answer, steps = run_loop(
+            _question_messages(user_turn, history, context), load_tools(), max_tokens, True)
     return answer, trace + steps
 
 
@@ -311,7 +377,7 @@ def selftest():
     """Offline checks (no server, no API key needed)."""
     tools = load_tools()
     names = [t["function"]["name"] for t in tools]
-    assert names == ["flex_capacity", "min_shear_reinf", "shear_capacity"], names
+    assert names == ["design_beam", "flex_capacity", "min_shear_reinf", "shear_capacity"], names
     for t in tools:
         assert t["type"] == "function", t
         assert set(t["function"]) == {"name", "description", "parameters"}, t["function"]
@@ -354,7 +420,7 @@ def selftest():
     ]
     idx = {"n": 0}
 
-    def fake_chat(messages, tools, max_tokens):
+    def fake_chat(messages, tools, max_tokens, thinking=False):
         msg = sequence[idx["n"]]
         idx["n"] += 1
         return msg
@@ -395,18 +461,25 @@ def selftest():
     finally:
         globals()["_api"] = saved_api
         profiles.load_settings = saved_load_settings
-    # defaults flow into the payload; unset sampling params stay absent
+    # defaults flow into the payload; unset sampling params stay absent;
+    # the fast path is the default (enable_thinking explicitly False)
     d = sent["data"]
     assert d["temperature"] == 0.2, d
     assert d["repeat_penalty"] == 1.1, d
     assert d["max_tokens"] == 12000, d
+    assert d["enable_thinking"] == False, "default chat() must send enable_thinking=false"  # noqa: E712
     assert "top_k" not in d and "top_p" not in d and "min_p" not in d, \
         "unset sampling params must be omitted, not sent as null"
 
-    # a profile override flows into the payload
+    # a profile override flows into the payload. chat() resolves the profile
+    # under the LOADED model (which may be gemma/anything on a live box), so
+    # pin _loaded_model to the override's key: otherwise the test decides by
+    # whatever happens to be resident (verified flake 2026-10-08: gemma was
+    # loaded, the granite override silently didn't apply, KeyError 'min_p').
     sent = {}
     saved_api = globals()["_api"]
     saved_load_settings = profiles.load_settings
+    saved_loaded_model = globals().get("_loaded_model")
 
     def fake_api2(method, path, data=None):
         sent["data"] = data
@@ -414,19 +487,69 @@ def selftest():
 
     globals()["_api"] = fake_api2
     try:
+        globals()["_loaded_model"] = lambda: "ibm-granite/granite-4.2-8b-GGUF"
         profiles.load_settings = lambda: {
             "global": {"temperature": 0.7, "top_k": 33},
-            "models": {"unsloth/granite-4.1-8b-GGUF": {"min_p": 0.05}},
+            "models": {"ibm-granite/granite-4.2-8b-GGUF": {"min_p": 0.05}},
         }
         chat([{"role": "user", "content": "q"}], load_tools(), None)
     finally:
         globals()["_api"] = saved_api
         profiles.load_settings = saved_load_settings
+        if saved_loaded_model is None:
+            globals().pop("_loaded_model", None)
+        else:
+            globals()["_loaded_model"] = saved_loaded_model
     d = sent["data"]
     assert d["temperature"] == 0.7 and d["top_k"] == 33, d
     assert d["min_p"] == 0.05, d
     assert d["repeat_penalty"] == 1.1, "unset repeat_penalty keeps the default"
     assert d["max_tokens"] == 12000, "None max_tokens -> profile default"
+
+    # explicit thinking=True flows into the payload too
+    saved_api = globals()["_api"]
+    sent = {}
+
+    def fake_api3(method, path, data=None):
+        sent["data"] = data
+        return {"choices": [{"message": {"content": "ok"}}]}
+
+    globals()["_api"] = fake_api3
+    try:
+        chat([{"role": "user", "content": "q"}], load_tools(), 12000, thinking=True)
+    finally:
+        globals()["_api"] = saved_api
+    assert sent["data"]["enable_thinking"] == True, sent["data"]  # noqa: E712
+
+    # answer_turn routing/retry decisions (run_loop stubbed):
+    #  - parameter-extraction style -> fast first pass, escalate to thinking
+    #    once on failure (empty answer)
+    #  - ambiguous keyword -> thinking on the first pass, no retry
+    #  - calc-style no-keyword -> fast, retried because it answered without
+    #    a tool call
+    saved_run_loop = globals()["run_loop"]
+    seen = []
+
+    def fake_run_loop(messages, tools, max_tokens, thinking=False,
+                      answer="") -> tuple:
+        seen.append(thinking)
+        if answer:
+            return answer, [{"kind": "answer", "content": answer}]
+        return "", [{"kind": "answer", "content": ""}]
+
+    globals()["run_loop"] = fake_run_loop
+    try:
+        answer_turn("what is Av,min for b_w=350, f_c=28, f_yt=420?", [], None)
+        answer_turn("which design should I assume for this beam?", [], None)
+        answer_turn("calculate Vc for the beam", [], None)
+    finally:
+        globals()["run_loop"] = saved_run_loop
+    # extraction question: fast (False) then escalate (True)
+    assert seen[:2] == [False, True], f"fast-then-escalate expected, got {seen[:2]}"
+    # ambiguous design question: thinking on first pass, no retry
+    assert seen[2:3] == [True], f"ambiguous routes to thinking first pass, got {seen[2:3]}"
+    # calc-style with no keyword: fast (False) then retry (True)
+    assert seen[3:5] == [False, True], f"calc retry expected, got {seen[3:5]}"
 
     # repetition guard: a degenerate repeated-line block is truncated
     # (the 8B-model failure mode that burned the whole token budget in
