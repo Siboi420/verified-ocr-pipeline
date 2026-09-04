@@ -70,6 +70,28 @@ curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8888/   # 200
 curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:5000/   # 200
 ```
 
+## Share the demo (public link — read the warning)
+
+> **⚠ Security: a quick tunnel is PUBLIC and UNAUTHENTICATED.** Anyone with
+> the URL can use your GPU and query your knowledge bases. Treat it as a
+> one-off demo link: bring it up right before showtime, share `/chat` (the
+> chat page), and kill it the moment the demo is over. Never leave one
+> parked unattended, and never put the URL in a public chat.
+
+```bash
+# bring up (grab the https://...trycloudflare.com URL from the log)
+nohup cloudflared tunnel --url http://127.0.0.1:5000 \
+  > /tmp/cloudflared.log 2>&1 &
+grep -oP 'https://[a-z0-9-]+\.trycloudflare\.com' /tmp/cloudflared.log | tail -1
+
+# take down (verify with pgrep -x; bare 'pkill cloudflared' matches itself)
+pkill -f "cloudflared tunnel --url" || true
+pgrep -x cloudflared || echo "tunnel down"
+```
+
+Share `https://<url>/chat` so she lands directly on the chat tab (sessions
+are per-browser and auto-created on first send).
+
 Open <http://127.0.0.1:5000>.
 
 ## Tests
