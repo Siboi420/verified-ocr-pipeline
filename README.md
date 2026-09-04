@@ -26,8 +26,10 @@ A single Flask server on `:5000` serves everything — two browser-style tabs:
   `clear_cover` / `stirrup_diameter` / `longitudinal_bar_diameter` → spaced
   words), so equations read as clean notation instead of raw
   `\text{…\_…}` markup. With **no KB selected** the assistant answers from
-  general engineering knowledge; with a KB it stays source-grounded (cites
-  chunks, says when something isn't in the sources).
+  general engineering knowledge; with a KB it cites the retrieved chunks
+  when the answer draws on them, and if the KB doesn't cover the question
+  it answers from general knowledge while saying clearly the answer is not
+  from the attached sources (never fakes a citation).
 
 Both pages share a top bar with the **model control**: a chip showing which
 model is loaded plus a dropdown of the GGUF models/quants actually cached on

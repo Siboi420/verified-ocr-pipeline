@@ -408,12 +408,23 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   profile's cap, applied in `chat()`); **no-KB sessions answer from general
   knowledge (2026-11):** when `kb_id` is None the context is
   `"(no knowledge base attached)"` and the system prompt swaps to
-  `SYSTEM_PROMPT_BARE` (drops the RAG source-citation / "if not in your
-  sources, say so" guardrails; tool/format rules identical) — previously
-  the model refused general questions like "what is concrete made out of?"
-  with "not in your sources" when no KB was attached (session
-  a192daf89093). With `kb_id` set the full `SYSTEM_PROMPT` (source
-  guardrails) applies. `chat(messages, tools, max_tokens=None,
+  `SYSTEM_PROMPT_BARE` (drops the RAG source-citation guardrails; tool/
+  format rules identical) — previously the model refused general
+  questions like "what is concrete made out of?" with "not in your
+  sources" when no KB was attached (session a192daf89093). **KB sessions
+  also fall back to labeled general knowledge (2026-11):** `SYSTEM_PROMPT`
+  says never to attribute to / invent citations for the retrieved sources
+  info they don't contain, and — when the retrieved context doesn't cover
+  the question — to answer from the model's own engineering knowledge
+  while saying explicitly the answer is not from the attached sources
+  (so a KB-attached session answers general questions instead of
+  refusing). **Wording lesson (verified live):** the softer "answer from
+  general knowledge and say it's not from the sources" phrasing was NOT
+  enough — granite still refused with "not in your sources"; the working
+  wording adds an explicit anti-refusal clause ("Never reply just 'not in
+  the sources' - always answer the question") plus a concrete leading
+  format (“From general engineering knowledge (not from the attached
+  sources): ”), which granite followed verbatim. `chat(messages, tools, max_tokens=None,
   thinking=False)`
   resolves the loaded model's generation profile once via
   `profiles.resolve(_loaded_model())` and sends `temperature`, `repeat_penalty`,
