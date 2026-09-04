@@ -18,7 +18,14 @@ A single Flask server on `:5000` serves everything — two browser-style tabs:
   and
   messages render **markdown** (tables, bold, headers, lists) **and LaTeX**;
   every reply is tagged with the KB it used (`via KB: <name>` / `no KB`).
-  Developer mode shows the retrieval / reasoning / tool-call trace.
+  Developer mode shows the retrieval / reasoning / tool-call trace. The chat
+  page is chat-first: the thread fills the viewport with the input pinned at
+  the bottom, the Sessions sidebar collapses via the ☰ button (state persists),
+  and ⚙ Settings is a dropdown anchored to the button. Model-written math
+  parameter names are normalized on render (`cover` → `p`;
+  `clear_cover` / `stirrup_diameter` / `longitudinal_bar_diameter` → spaced
+  words), so equations read as clean notation instead of raw
+  `\text{…\_…}` markup.
 
 Both pages share a top bar with the **model control**: a chip showing which
 model is loaded plus a dropdown of the GGUF models/quants actually cached on
@@ -26,7 +33,10 @@ disk — **one entry per installed quant** (e.g. `granite-4.2-8b (Q6_K)`,
 `GLM-OCR (Q8_0)`) — and a Load button. The backend holds one resident model
 at a time, so a swap is always unload-before-load with a progress toast. The
 two defaults are GLM-OCR for OCR and granite (pinned to the `Q6_K`
-quant) for chat; any cached model/quant can be picked.
+quant) for chat; any cached model/quant can be picked. The top bar also
+carries the **theme toggle** (☾/☀): a dark slate-gray theme is the default,
+light is one click away, and the choice persists in `localStorage` (the
+OCR page's PDF preview stays white on purpose).
 
 Knowledge bases (Unsloth RAG) can be listed / created / renamed / deleted and
 fed verified items from the OCR tab (one doc or all).
@@ -102,7 +112,7 @@ python3 functions/test_shear_tools.py    # 28 beam tool checks
 python3 orchestrator.py --selftest       # chat loop trace checks (offline)
 python3 rag_uploader.py --selftest       # KB render checks (offline)
 python3 models.py --selftest             # model mgmt wiring (offline)
-python3 smoke_test.py                    # 233 end-to-end route checks (no
+python3 smoke_test.py                    # 239 end-to-end route checks (no
                                               # live OCR)
 ```
 
@@ -118,8 +128,10 @@ python3 smoke_test.py                    # 233 end-to-end route checks (no
   given Vu/Mu + section bounds, min total cost per metre at USD-default
   placeholder rates or the `idr` preset (Indonesian Rp/m³, Rp/kg))
 - `schemas/` — OpenAI function-calling tool schemas
-- `templates/` — `_header.html` (tabs + per-quant model dropdown), `index.html` (OCR),
-  `chat.html` (chat: markdown + LaTeX rendering, KB tag, dev trace)
+- `templates/` — `_header.html` (tabs + per-quant model dropdown + theme
+  toggle + shared CSS tokens), `index.html` (OCR),
+  `chat.html` (chat: markdown + LaTeX rendering, KB tag, dev trace,
+  full-height layout / collapsible sidebar / settings dropdown)
 - `docs/` — infrastructure, KB query guidance, corrections, voice roadmap
 - `validation/` — pending docs, verified/rejected item JSON (gitignored)
 - `sessions/` — chat sessions (gitignored)

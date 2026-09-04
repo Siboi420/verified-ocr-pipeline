@@ -19,7 +19,25 @@ Before committing, check these sections against the diff and update what moved:
   commands that changed, new test files.
 
 A commit that touches code but not AGENTS.md is incomplete. (This rule itself is
-the result of a commit that forgot it once.)
+ the result of a commit that forgot it once.)
+
+## ⛔ Mandatory: keep README.md in sync with meaningful changes
+
+**Every meaningful change — new features, UI/UX changes, behavior or
+route changes a user would notice, test-count updates, layout/setup
+changes — MUST also update README.md in the same commit.** README.md is
+ the human-facing entry point (what the app does, how to run it);
+ AGENTS.md is the AI-facing technical reference. Both must tell the same
+ story. Trivial diffs (typos, internal refactors with no visible effect,
+ comment-only changes) can skip it — "meaningful" means visible to a
+ user or a reader of the README.
+
+ Before committing, ask: does this diff change something README.md
+ describes? If yes, update the README bullets in the same commit: feature
+ lists, screenshots/blurbs, test counts, run instructions. A commit that
+ adds a user-visible feature but not the README line is incomplete.
+ (This rule is the result of the dark-mode + chat-layout work landing
+ without README updates.)
 
 ## What this project is
 
@@ -507,6 +525,21 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   progress toast and calls `pollModelJob` — this is how progress survives a tab
   switch, since tabs are full page loads), and `window.kbFetch()` (GET /api/kb
   helper).
+  **Dark theme + shared toggle (2026-10-10):** this template is the single
+  source of truth for colors — the full token set (`--bg`/`--surface`/
+  `--surface-hover`/`--text`/`--muted`/`--line`/`--line-strong`/`--accent`/
+  `--accent-bg`/`--accent-text`/`--ok*`/`--err*`/`--warn*`/`--purple*`/
+  `--gray*`/`--msg-assistant-bg`/`--code-bg`/`--merged-bg`/`--ocrbar*`) is
+  defined here as `:root { … }` (light) + `:root[data-theme="dark"] { … }`
+  (dark, default) with matching `color-scheme`, plus the shared
+  `input, select, textarea { background: var(--surface); color: var(--text); }`
+  rule so form fields follow the theme. The two pages removed their own
+  `:root { --line … }` mini-blocks (consolidated). `#themeBtn` (☾ in dark /
+  ☀ in light, right of `#loadBtn`) flips `data-theme` on `<html>` and writes
+  `localStorage.theme`; the pages hard-code `data-theme="dark"` on `<html>`
+  and an inline head script overrides it with the stored choice before first
+  paint (anti-FOUC). The PDF preview (`#pageImg`) intentionally stays white in
+  both themes; `.trace`/`.toast` are already dark and stay hardcoded.
 - `templates/index.html` — single-page JS UI. Includes `_header.html` (`
   tab="ocr"`, `page_model="ocr"`; the old inline `<header>` is now a card row
   holding the doc pill / counter / OCR-coverage / OCR-more inputs). List branch
@@ -579,6 +612,16 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   flow is untouched). Every item has a Delete button — `confirm()` then POST
   `/item/<doc>/<item>/delete`, re-render, no cursor advance; the item and its
   verified/rejected copies are removed.
+  **Theming (2026-10-10):** every hardcoded color here was replaced with the
+  shared tokens from `_header.html` (`body` → `--text`, `.card`/`.item` →
+  `--surface`, badges → `--ok-bg`/`--warn-bg`/`--purple-bg`/`--gray-bg`
+  families, table grids → `--line-strong`, merged cells → `--merged-bg`,
+  `#ocrbar` → `--ocrbar-bg`/`--ocrbar-border`, `.ok`/`.err` → `--ok`/`--err`,
+  `.item.verified/rejected/active` → `--ok-border`/`--err-border`/`--accent`);
+  `#pageImg` keeps `background:#fff`, `#bboxSel` keeps its translucent red
+  overlay (drawn on the white page). The local `:root { --line … }` block is
+  gone; `<html>` carries `data-theme="dark"` + the anti-FOUC head script.
+  No route/API change — the smoke-tested DOM ids are untouched.
 - `templates/chat.html` — chat page (`tab="chat"`; loads a session from
   `?s=<sid>`, `const SESSION` is `null` when none — routes guard that).
   Sidebar: sessions list (click to switch) + new / rename / delete;
@@ -598,7 +641,21 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   factor `\Phi` (its own name leaks into the math it echoes from tool output —
   seen in session 86c6c4b58ce3, `\(\Granite V_n\)` = φV_n, `\Granite = 0.75`
   per §21.2.1), so `\Granite` is rewritten to `\Phi` inside math spans at
-  extraction time (`/\\granite/gi`). `.msg` keeps `overflow-wrap` instead of
+  extraction time (`/\\granite/gi`). Same rewrite slot carries the **math
+  parameter-name fix**: the model emits `\text{cover\_cg}` (e.g. session
+  09db31f8448d), which MathJax renders as the literal string "cover_cg" — a
+  backslash-underscore inside `\text{}` is NOT a subscript (verified live
+  in headless Chromium) — so every spelling (`\text{cover\_cg}`,
+  `\text{cover}_{cg}`, plain `\text{cover}`) is rewritten to the single
+  letter `p` (the user's notation, no `cg` subscript;
+  `\text{cover}_{cg}` consumes the trailing `_{cg}` so it can't survive as
+  `p_{cg}`), and the sibling underscore names render as spaced text —
+  `\text{clear\_cover}` → `clear cover`, `\text{stirrup\_diameter}` →
+  `stirrup diameter`, `\text{longitudinal\_bar\_diameter}` → `longitudinal
+  bar diameter` — so the equation `p = clear cover + stirrup diameter +
+  (longitudinal bar diameter)/2` reads as words, never as
+  `clear\_cover+stirrup\_diameter` (phrases like `\text{minimum cover}`
+  never match the exact `\text{cover` prefix). `.msg` keeps `overflow-wrap` instead of
   `pre-wrap` (`breaks:true` supplies line breaks); minimal table CSS added;
   error/toast paths and the dev trace stay plain text. KB selector with a "no
   KB" option — the message POST carries the dropdown's `kb_id` (the server
@@ -622,6 +679,21 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   load". Save posts the full shape to `/api/settings` and toasts on success;
   on open the panel refreshes both settings and the installed-model list from
   the server.
+  **Chat-first full-height layout + theming (2026-10-10):** `.wrap` is now
+  `display:flex; flex-direction:column; height:100vh` (chat page only — the
+  OCR page has its own `.wrap`), `#layout` is `flex:1; min-height:0`, `#wrap`
+  `flex:1; min-width:0` (column), `#thread` dropped its `max-height:68vh`
+  clamp for `flex:1; min-height:0` so it fills the viewport and scrolls
+  internally, and `#inputRow` sits naturally pinned at the bottom (Enter
+  still sends). `#sideToggle` (☰, first item in `#rowbar`) collapses `#side`
+  via a `.hidden` class, persisted as `localStorage.chatSide`
+  ("open"/"collapsed", default open, restored before first render).
+  `#settingsBtn` + `#settingsPanel` are wrapped in a `position:relative`
+  `#settingsWrap`; the panel is now an absolutely-positioned dropdown
+  (`top: calc(100% + 6px); right: 0; min-width:360px; max-height:70vh;
+  overflow:auto; z-index:50`, shadow) — the open/close `hidden` toggle JS is
+  unchanged. All colors migrated to the shared tokens in `_header.html`;
+  the `:root { --line … }` mini-block was removed.
 - `validation/` — `pending/` (docs), `verified/<doc_id>/`, `rejected/<doc_id>/` (per-item JSON), `uploads/<doc_id>/` (pdf, md, page PNGs).
 - `functions/beam_calc.py` — self-contained, **stdlib-only** (math; numpy/matplotlib/argparse/yaml dropped) ACI 318M-19 beam shear/flexure calcs extracted from the BeamValidation repo
   (github.com/Siboi420/BeamValidation, commit `668be3670dc8ba065f215a0ca1b59eb9e3bd8ca5`, `scripts/RCBeam_moment_capacity.py`). Public: `min_shear_reinf(b_w, f_c, f_yt)` → Av,min per metre (mm²/m, §9.6.3.3, `max(0.062·√f'c·b_w/f_yt, 0.35·b_w/f_yt)·1000`); `shear_capacity(b, d=None, f_c=None, A_v=0, s=0, f_yw=0, A_s=None, V_u=None, M_u=None, h=None, cover_cg=None)` → wrapped `compute_aci_shear` — effective depth is **d, or h with cover_cg (d = h − cover_cg), never both (loud XOR ValueError), rejected cover_cg ≥ h**, Vc rows: simplified `§22.5.5.1(a)`; detailed `(b)` only when stirrups ≥ Av,min AND A_s+V_u+M_u given, capped `§22.5.8.5.3`-adjacent `0.29·λ·√f'c·b·d`; **size-effect `(c)` when stirrups < Av,min (or absent) and A_s given: `λ_s = min(√(2/(1+d/250)), 1)` (§22.5.5.1.3), `V_c = 0.66·λ_s·λ·ρ_w^⅓·√f'c·b·d`**; Av,min comparison via `min_shear_reinf(b, f_c, f_yw)·s/1000` (reused, not duplicated); stirrups adequate ⇔ that inequality; φ_v=0.75; returns `Vc_criterion` ("row (a)"|"row (b)"|"row (c)") + `lambda_s` on top of the numeric keys; `flex_capacity(b, d=None, A_s=None, f_c=None, f_yl=None, h=None, cover_cg=None)` → wrapped `compute_aci_flexure` (stress block §22.2.2.1, β₁ §22.2.2.4.3, φ Table 21.2.2), same d/h XOR path. Constants EPSILON_CU=0.003, Es=2e5, λ=1.0.
@@ -716,7 +788,7 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   stubs deleted, remaining: granite-4.2-8b (Q6_K), GLM-OCR (Q8_0),
   takes a literal model path (+ optional `variant` from the dropdown) with
   variant-aware "already loaded" matching.
-  Smoke test now 233 checks.
+  Smoke test now 239 checks.
 - **Generation profiles (implemented 2026-09-15):** a global default profile
   + per-model overrides in `BASE/settings.json` (gitignored), applied to
   every chat session automatically via `profiles.resolve` — built-ins
@@ -826,7 +898,7 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
 
 - `python3 test_itemizer.py` — 73 itemizer assertions.
 - `python3 functions/test_shear_tools.py` — 28 hand-calc checks for the `functions/` shear/flexure tools (Av,min mm²/m, simplified Vc, row (c) size-effect Vc incl. λ_s + ρ_w, adequate-stirrup rows (a)/(b), partial stirrups → row (c) + V_s, d↔h/cover_cg equivalence for shear and flex, d-resolution errors (XOR/neither/cover≥h), row (a) fallback, wrapper shape + unit/basis incl. h-path, validation error paths; plus 9 `design_beam` checks: pure-shear optimum 250×350×20 D19×1 (with the stirrup-clamp regression guard: s == s_max == d/2 and Vs > 0) cheaper-or-equal to the b=300,d=500 class, min-stirrup path vs Av,min, flexure gate binds (φM_n ≥ M_u, A_s ≥ As,min, no 250×350 row at M_u=200, optimum 250×550×20 D16×6), d = h − cover − φ_long/2 (incl. custom cover), Vs ≤ 0.66·√f'c·b·d + s ∈ [100, s_max] + s_max switch, bound/step iteration (max_b=385 → b ≤ 385), infeasible → `[]` + reason (V_u=300 and M_u=900 cases), cost-ranked top-5 determinism, wrapper registration + array/object validation errors + string-key `rate_conc` applied (cost_concrete equals the custom rate·b·h/1e6) + non-numeric grade key → ValueError; plain asserts + PASS/FAIL, exit non-zero on failure.
-- `python3 smoke_test.py` — 233 end-to-end checks via Flask test client (no live OCR,
+- `python3 smoke_test.py` — 239 end-to-end checks via Flask test client (no live OCR,
   no backend; `rag_uploader._api`, `models.current_model/unload/load/list_models`,
   and `orchestrator.answer_turn` stubbed where they'd hit :8888):
   the original 132 assert `?ocr=1` redirect, no-key OCR error,
@@ -879,6 +951,14 @@ Source PDF -> /upload (PDF-only -> auto-OCR via ?ocr=1; optional ocr_pages="2-3,
   per-model override clearing the entry, the chat route calling
   `answer_turn` with no positional max-tokens, and `/chat` rendering the
   settings panel (global + per-model fieldsets).
+  the new 5 (234 -> 239) add dark theme + chat layout: `/` and `/chat` both
+  carry `<html lang="en" data-theme="dark">` + the anti-FOUC head
+  script (`localStorage.getItem('theme') || 'dark'`) + the shared
+  `#themeBtn`, `/` carries the dark token palette (`--bg:#0f172a`,
+  `--surface:#1e293b`, `--line:#334155`), `/chat` carries `#sideToggle` +
+  `#thread` + `#inputRow` + `#settingsWrap` (+ `#settingsPanel`/
+  `#settingsBtn` nested) and preserves `modelSel`/`loadBtn`/`settingsSave`/
+  `moSel`/`g-context_length`/`kbSel` + tab links + the marked CDN.
 - `python3 profiles.py --selftest` — offline: defaults/global/per-model
   resolution (per-model beats global beats built-ins), resolved-snapshot-path
   matching against a repo-id key (base name, `-GGUF` stripped), sanitize

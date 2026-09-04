@@ -1,6 +1,10 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
+<script>
+// apply the persisted theme before first paint (dark is the default)
+try { document.documentElement.dataset.theme = localStorage.getItem('theme') || 'dark'; } catch (e) {}
+</script>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>OCR Validation</title>
@@ -9,52 +13,51 @@ window.MathJax = {tex: {inlineMath: [["\\(", "\\)"], ["$", "$"]]}};
 </script>
 <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js" async></script>
 <style>
-  :root { --line:#ccc; --muted:#666; --bg:#f7f7f7; }
   * { box-sizing: border-box; }
-  body { font-family: system-ui, sans-serif; margin: 0; background: var(--bg); color: #222; }
+  body { font-family: system-ui, sans-serif; margin: 0; background: var(--bg); color: var(--text); }
   .wrap { max-width: 1500px; margin: 0 auto; padding: 16px; }
   header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin-bottom: 12px; }
   header h1 { font-size: 20px; margin: 0; }
   .muted { color: var(--muted); font-size: 13px; }
-  button { cursor: pointer; padding: 4px 10px; border: 1px solid var(--line); border-radius: 4px; background: #fff; }
-  button:hover { background: #eee; }
+  button { cursor: pointer; padding: 4px 10px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface); color: var(--text); }
+  button:hover { background: var(--surface-hover); }
   input[type=text], input[type=file], textarea, select { border: 1px solid var(--line); border-radius: 4px; padding: 4px 6px; }
-  .card { background: #fff; border: 1px solid var(--line); border-radius: 6px; padding: 12px; margin-bottom: 16px; }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 12px; margin-bottom: 16px; }
   .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
   #main { display: flex; gap: 16px; align-items: flex-start; }
   #pane { flex: 0 0 46%; max-width: 640px; position: sticky; top: 12px; }
   #imgWrap { overflow: auto; max-height: calc(100vh - 250px); }
   #imgBox { position: relative; display: inline-block; min-width: 100%; }
   #pageImg { display: block; border: 1px solid var(--line); border-radius: 4px; background: #fff; }
-  #bboxSel { position: absolute; border: 2px solid #ef4444; background: rgba(239,68,68,.15);
+  #bboxSel { position: absolute; border: 2px solid var(--err-border); background: rgba(239,68,68,.15);
              pointer-events: none; display: none; z-index: 5; }
   #items { flex: 1 1 auto; display: flex; flex-direction: column; gap: 10px; }
-  .item { border: 1px solid var(--line); border-radius: 6px; background: #fff; padding: 10px; }
+  .item { border: 1px solid var(--line); border-radius: 6px; background: var(--surface); padding: 10px; }
   .item.done { opacity: .6; }
-  .item.verified { border-color: #22c55e; background: #f0fdf4; }
-  .item.rejected { border-color: #ef4444; background: #fef2f2; }
-  .item.active { outline: 2px solid #3b82f6; }
+  .item.verified { border-color: var(--ok-border); background: var(--ok-bg); }
+  .item.rejected { border-color: var(--err-border); background: var(--err-bg); }
+  .item.active { outline: 2px solid var(--accent); }
   .badge { display: inline-block; font-size: 11px; text-transform: uppercase; letter-spacing: .5px;
-           background: #eef2ff; color: #3730a3; border-radius: 3px; padding: 2px 6px; margin-right: 8px; }
-  .badge.table { background:#ecfdf5; color:#065f46; }
-  .badge.equation { background:#fff7ed; color:#9a3412; }
-  .badge.math { background:#fdf4ff; color:#86198f; }
-  .badge.skipped { background:#f3f4f6; color:#374151; }
+           background: var(--accent-bg); color: var(--accent-text); border-radius: 3px; padding: 2px 6px; margin-right: 8px; }
+  .badge.table { background: var(--ok-bg); color: var(--ok); }
+  .badge.equation { background: var(--warn-bg); color: var(--warn-text); }
+  .badge.math { background: var(--purple-bg); color: var(--purple-text); }
+  .badge.skipped { background: var(--gray-bg); color: var(--gray-text); }
   .content { margin: 8px 0; white-space: pre-wrap; font-size: 14px; }
   .mathbox { overflow-x: auto; }
   .caption { font-weight: 600; margin: 6px 0 4px; }
   table.grid { border-collapse: collapse; width: 100%; }
   table.grid { border-collapse: collapse; }
-  table.grid td { border: 1px solid #ddd; }
-  table.grid td.sel { outline: 2px solid #3b82f6; }
-  table.grid td.merged { background: #f5f3ff; }
-  table.grid input { width: 100%; border: 1px solid #ddd; border-radius: 3px; padding: 3px 5px; font-size: 13px; }
+  table.grid td { border: 1px solid var(--line-strong); }
+  table.grid td.sel { outline: 2px solid var(--accent); }
+  table.grid td.merged { background: var(--merged-bg); }
+  table.grid input { width: 100%; border: 1px solid var(--line-strong); border-radius: 3px; padding: 3px 5px; font-size: 13px; }
   .actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
   input.order { width: 3.5em; border: 1px solid var(--line); border-radius: 4px; padding: 4px 6px; }
-  .ok { color: #065f46; } .err { color: #991b1b; }
-  #ocrbar { display: none; padding: 8px 12px; border-radius: 6px; margin-bottom: 12px; background: #eff6ff; border: 1px solid #bfdbfe; }
-  .pill { font-size: 12px; background:#eef2ff; border-radius: 10px; padding: 2px 8px; }
-  button.discardList { padding: 2px 8px; font-size: 12px; color: #991b1b; }
+  .ok { color: var(--ok); } .err { color: var(--err); }
+  #ocrbar { display: none; padding: 8px 12px; border-radius: 6px; margin-bottom: 12px; background: var(--ocrbar-bg); border: 1px solid var(--ocrbar-border); }
+  .pill { font-size: 12px; background: var(--accent-bg); border-radius: 10px; padding: 2px 8px; }
+  button.discardList { padding: 2px 8px; font-size: 12px; color: var(--err); }
 </style>
 </head>
 <body>

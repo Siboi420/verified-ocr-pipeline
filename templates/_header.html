@@ -1,19 +1,50 @@
 {# Shared top bar: browser-style tabs, model dropdown + status chip, and
    a toast container. Included by index.html and chat.html. The dropdown
    lists the models installed in Unsloth Studio (GET /api/model). #}
+{# Theme tokens — the single source of truth for colors on both pages.
+   The page templates hard-code data-theme="dark" on <html> and an inline
+   head script flips it to the user's stored choice before first paint;
+   #themeBtn below writes localStorage.theme. The PDF preview (#pageImg)
+   stays white by design; .trace/.toast are already dark in both themes. #}
 <style>
+  :root { color-scheme: light;
+    --bg:#f7f7f7; --surface:#fff; --surface-hover:#eee; --text:#222; --muted:#666;
+    --line:#ccc; --line-strong:#d0d5dd;
+    --accent:#2563eb; --accent-bg:#eef2ff; --accent-text:#3730a3;
+    --ok:#065f46; --ok-bg:#ecfdf5; --ok-border:#22c55e;
+    --err:#991b1b; --err-bg:#fef2f2; --err-border:#ef4444;
+    --warn-bg:#fff7ed; --warn-text:#9a3412;
+    --purple-bg:#fdf4ff; --purple-text:#86198f;
+    --gray-bg:#f3f4f6; --gray-text:#374151;
+    --msg-assistant-bg:#f3f4f6; --code-bg:#f1f3f5; --merged-bg:#f5f3ff;
+    --ocrbar-bg:#eff6ff; --ocrbar-border:#bfdbfe;
+  }
+  :root[data-theme="dark"] { color-scheme: dark;
+    --bg:#0f172a; --surface:#1e293b; --surface-hover:#334155; --text:#e2e8f0; --muted:#94a3b8;
+    --line:#334155; --line-strong:#475569;
+    --accent:#3b82f6; --accent-bg:#1e3a8a; --accent-text:#a5b4fc;
+    --ok:#34d399; --ok-bg:rgba(16,185,129,.12); --ok-border:#10b981;
+    --err:#f87171; --err-bg:rgba(239,68,68,.12); --err-border:#ef4444;
+    --warn-bg:rgba(249,115,22,.12); --warn-text:#fdba74;
+    --purple-bg:rgba(217,70,239,.12); --purple-text:#e879f9;
+    --gray-bg:#334155; --gray-text:#cbd5e1;
+    --msg-assistant-bg:#334155; --code-bg:#0f172a; --merged-bg:rgba(167,139,250,.12);
+    --ocrbar-bg:#172554; --ocrbar-border:#1e40af;
+  }
+  /* form fields follow the theme (pages keep their own border/padding rules) */
+  input, select, textarea { background: var(--surface); color: var(--text); }
   .topbar { display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
   .tabs { display: flex; gap: 4px; }
-  .tabs a { text-decoration: none; padding: 6px 16px; border: 1px solid var(--line, #ccc);
-            border-bottom: none; border-radius: 6px 6px 0 0; background: #fff; color: #222;
+  .tabs a { text-decoration: none; padding: 6px 16px; border: 1px solid var(--line);
+            border-bottom: none; border-radius: 6px 6px 0 0; background: var(--surface); color: var(--text);
             font-size: 14px; }
-  .tabs a.active { background: #2563eb; border-color: #2563eb; color: #fff; }
+  .tabs a.active { background: var(--accent); border-color: var(--accent); color: #fff; }
   #modelBar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-left: auto; padding-bottom: 2px; }
   #modelBar .muted { font-size: 12px; }
-  #modelChip { font-size: 12px; background: #eef2ff; border: 1px solid var(--line, #ccc);
+  #modelChip { font-size: 12px; background: var(--accent-bg); border: 1px solid var(--line);
                border-radius: 10px; padding: 2px 10px; max-width: 340px; overflow: hidden;
                text-overflow: ellipsis; white-space: nowrap; }
-  #modelChip.loaded { background: #ecfdf5; color: #065f46; }
+  #modelChip.loaded { background: var(--ok-bg); color: var(--ok); }
   #modelSel { font-size: 12px; max-width: 280px; }
   #modelBar button { font-size: 12px; padding: 3px 10px; }
   #modelBar button:disabled, #modelSel:disabled { opacity: .5; cursor: default; }
@@ -35,6 +66,7 @@
     <span id="modelChip">…</span>
     <select id="modelSel" title="models installed in Unsloth Studio"></select>
     <button id="loadBtn" onclick="loadModel()">Load</button>
+    <button id="themeBtn" title="toggle dark/light theme">☾</button>
   </div>
 </div>
 <div id="toasts"></div>
@@ -159,5 +191,21 @@ window.kbFetch = async function() {
     return j;
   } catch (e) { return {ok:false, knowledgeBases:[]}; }
 };
+// Theme toggle: flips data-theme on <html>, persists to localStorage.
+// The head anti-FOUC script already set the initial theme; this keeps the
+// glyph (☾ in dark / ☀ in light) in sync and handles the click.
+(function () {
+  const btn = document.getElementById('themeBtn');
+  if (!btn) return;
+  const paint = () =>
+    btn.textContent = document.documentElement.dataset.theme === 'dark' ? '☾' : '☀';
+  btn.addEventListener('click', () => {
+    const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+    document.documentElement.dataset.theme = next;
+    try { localStorage.setItem('theme', next); } catch (e) {}
+    paint();
+  });
+  paint();
+})();
 modelState();  // chip on page load
 </script>

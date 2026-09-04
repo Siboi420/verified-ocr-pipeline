@@ -1,6 +1,10 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
+<script>
+// apply the persisted theme before first paint (dark is the default)
+try { document.documentElement.dataset.theme = localStorage.getItem('theme') || 'dark'; } catch (e) {}
+</script>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Chat</title>
@@ -10,49 +14,54 @@ window.MathJax = {tex: {inlineMath: [["\\(", "\\)"], ["$", "$"]]}};
 <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js" async></script>
 <script src="https://cdn.jsdelivr.net/npm/marked@15/marked.min.js"></script>
 <style>
-  :root { --line:#ccc; --muted:#666; --bg:#f7f7f7; }
   * { box-sizing: border-box; }
-  body { font-family: system-ui, sans-serif; margin: 0; background: var(--bg); color: #222; }
-  .wrap { max-width: 1400px; margin: 0 auto; padding: 16px; }
+  body { font-family: system-ui, sans-serif; margin: 0; background: var(--bg); color: var(--text); }
+  .wrap { max-width: 1400px; margin: 0 auto; padding: 16px; display: flex; flex-direction: column; height: 100vh; }
   .muted { color: var(--muted); font-size: 13px; }
-  button { cursor: pointer; padding: 4px 10px; border: 1px solid var(--line); border-radius: 4px; background: #fff; }
-  button:hover { background: #eee; }
+  button { cursor: pointer; padding: 4px 10px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface); color: var(--text); }
+  button:hover { background: var(--surface-hover); }
   input[type=text], select, textarea { border: 1px solid var(--line); border-radius: 4px; padding: 4px 6px; font: inherit; }
-  #layout { display: flex; gap: 16px; align-items: flex-start; }
-  #side { flex: 0 0 260px; background: #fff; border: 1px solid var(--line); border-radius: 6px; padding: 12px; }
+  #layout { display: flex; gap: 16px; align-items: stretch; flex: 1; min-height: 0; }
+  #side { flex: 0 0 260px; background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 12px; }
+  #side.hidden { display: none; }
   #side h3 { margin: 0 0 8px; font-size: 15px; }
   #newRow { display: flex; gap: 6px; margin-bottom: 10px; }
   #newRow input { flex: 1; min-width: 0; }
   #sessionList { display: flex; flex-direction: column; gap: 4px; max-height: 40vh; overflow-y: auto; }
   .sess { display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-radius: 4px; cursor: pointer; }
-  .sess:hover, .sess.active { background: #eff6ff; }
+  .sess:hover, .sess.active { background: var(--accent-bg); }
   .sess .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
   .sess .x { border: none; background: none; padding: 0 6px; font-size: 13px; color: var(--muted); }
-  .sess .x:hover { color: #991b1b; }
+  .sess .x:hover { color: var(--err); }
   .sess input { flex: 1; min-width: 0; font-size: 13px; }
   #wrap { flex: 1 1 auto; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
-  #rowbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; background: #fff; border: 1px solid var(--line); border-radius: 6px; padding: 8px 12px; }
-  #thread { background: #fff; border: 1px solid var(--line); border-radius: 6px; padding: 14px; min-height: 40vh; display: flex; flex-direction: column; gap: 10px; overflow-y: auto; max-height: 68vh; }
+  #rowbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 8px 12px; }
+  #sideToggle { border: none; background: none; color: var(--text); padding: 0 6px; font-size: 16px; line-height: 1; }
+  #sideToggle:hover { background: none; color: var(--muted); }
+  #thread { background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 14px; display: flex; flex-direction: column; gap: 10px; overflow-y: auto; flex: 1; min-height: 0; }
   .msg { max-width: 78%; padding: 8px 12px; border-radius: 8px; font-size: 14px; line-height: 1.5; overflow-wrap: break-word; }
   .msg p, .msg ul, .msg ol, .msg pre, .msg blockquote, .msg table { margin: .4em 0; }
-  .msg pre { background: #f1f3f5; padding: 6px 8px; border-radius: 4px; overflow-x: auto; }
+  .msg pre { background: var(--code-bg); padding: 6px 8px; border-radius: 4px; overflow-x: auto; }
   .msg code { font-family: ui-monospace, Menlo, monospace; font-size: 13px; }
   .msg table { border-collapse: collapse; }
-  .msg th, .msg td { border: 1px solid #d0d5dd; padding: 3px 10px; }
-  .msg.assistant table { border-color: #d0d5dd; }
-  .msg.assistant th { background: #eef2ff; color: #1e293b; }
+  .msg th, .msg td { border: 1px solid var(--line-strong); padding: 3px 10px; }
+  .msg.assistant table { border-color: var(--line-strong); }
+  .msg.assistant th { background: var(--accent-bg); color: var(--text); }
   .msg.user th { background: rgba(255,255,255,.25); }
-  .msg.user { align-self: flex-end; background: #2563eb; color: #fff; }
-  .msg.assistant { align-self: flex-start; background: #f3f4f6; }
+  .msg.user { align-self: flex-end; background: var(--accent); color: #fff; }
+  .msg.assistant { align-self: flex-start; background: var(--msg-assistant-bg); }
   .tracewrap { align-self: flex-start; width: 96%; }
   .trace { background: #0f172a; color: #d1d5db; border-radius: 8px; padding: 10px 12px; margin-top: 6px;
            font-family: ui-monospace, Menlo, monospace; font-size: 12px; white-space: pre-wrap; word-break: break-word; }
   .chev { cursor: pointer; user-select: none; font-size: 13px; color: var(--muted); margin-top: 4px; }
-  .chev:hover { color: #222; }
+  .chev:hover { color: var(--text); }
   #inputRow { display: flex; gap: 8px; }
   #msgInput { flex: 1; min-height: 44px; resize: vertical; }
   #devToggle { display: flex; align-items: center; gap: 6px; }
-  #settingsPanel { background: #fff; border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px; }
+  #settingsWrap { position: relative; }
+  #settingsPanel { position: absolute; top: calc(100% + 6px); right: 0; z-index: 50; min-width: 360px;
+                   max-height: 70vh; overflow: auto; background: var(--surface); border: 1px solid var(--line);
+                   border-radius: 6px; padding: 10px 12px; box-shadow: 0 8px 24px rgba(0,0,0,.25); }
   #settingsPanel fieldset { border: 1px solid var(--line); border-radius: 6px; margin: 8px 0; }
   #settingsPanel legend { font-size: 13px; padding: 0 6px; color: var(--muted); }
   .sflds { display: flex; gap: 10px 14px; flex-wrap: wrap; }
@@ -78,14 +87,13 @@ window.MathJax = {tex: {inlineMath: [["\\(", "\\)"], ["$", "$"]]}};
   </div>
   <div id="wrap">
     <div id="rowbar">
+      <button id="sideToggle" title="toggle sessions sidebar">☰</button>
       <label class="muted">KB
         <select id="kbSel"><option value="">no KB</option></select>
       </label>
       <label class="muted" id="devToggle"><input type="checkbox" id="devMode"> Developer mode</label>
-      <button id="settingsBtn">⚙ Settings</button>
-      <span class="muted" style="margin-left:auto" id="modelHint">pick a model from the top bar</span>
-    </div>
-    <div id="settingsPanel" hidden>
+      <span id="settingsWrap"><button id="settingsBtn">⚙ Settings</button>
+      <div id="settingsPanel" hidden>
       <fieldset>
         <legend>Global — defaults for every model</legend>
         <div class="sflds">
@@ -114,6 +122,8 @@ window.MathJax = {tex: {inlineMath: [["\\(", "\\)"], ["$", "$"]]}};
         <button id="moClear">clear override</button>
       </fieldset>
       <button id="settingsSave">Save settings</button>
+      </div></span>
+      <span class="muted" style="margin-left:auto" id="modelHint">pick a model from the top bar</span>
     </div>
     <div id="thread"></div>
     <div id="inputRow">
@@ -146,7 +156,19 @@ function mdToHtml(s) {
   const math = [];
   s = String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
   s = s.replace(/\\\([\s\S]*?\\\)|\\\[[\s\S]*?\\\]|\$\$[\s\S]*?\$\$|\$[^$\n]+?\$/g,
-        m => { math.push(m.replace(/\\granite/gi, '\\Phi')); return '\u0000M' + (math.length - 1) + '\u0000'; });
+        m => { math.push(m.replace(/\\granite/gi, '\\Phi')
+            // parameter-name math -> notation: \text{cover\_cg} renders as
+            // the literal string "cover_cg" (a backslash-underscore inside
+            // \text{}, which MathJax does NOT treat as a subscript) — every
+            // spelling becomes the single letter p; the other underscore
+            // names (clear_cover / stirrup_diameter /
+            // longitudinal_bar_diameter) render as spaced text so the words
+            // stay readable instead of showing clear\_cover / stirrup\_diameter.
+            .replace(/\\text\{cover(?:_cg|\\_cg|_{cg})?\}(?:_cg|_{cg})?/g, 'p')
+            .replace(/\\text\{clear(?:_cover|\\_cover)\}/g, '\\text{clear cover}')
+            .replace(/\\text\{stirrup(?:_diameter|\\_diameter)\}/g, '\\text{stirrup diameter}')
+            .replace(/\\text\{longitudinal(?:_bar|\\_bar)?(?:_diameter|\\_diameter)\}/g, '\\text{longitudinal bar diameter}'));
+          return '\u0000M' + (math.length - 1) + '\u0000'; });
   let html = marked.parse(s, { breaks: true });
   // restore pass: replacer function — a string replacement would interpret
   // $ in the math ($$…$$ display spans collapse to $, $&/$`/$'/$1 mangle)
@@ -429,6 +451,14 @@ $('settingsSave').addEventListener('click', saveSettings);
 renderSessions();
 loadKBs();
 renderThread();
+
+// sidebar collapse state (persisted): restore before render so a
+// collapsed user never sees the sidebar flash
+try { if (localStorage.getItem('chatSide') === 'collapsed') $('side').classList.add('hidden'); } catch (e) {}
+$('sideToggle').addEventListener('click', () => {
+  const collapsed = $('side').classList.toggle('hidden');
+  try { localStorage.setItem('chatSide', collapsed ? 'collapsed' : 'open'); } catch (e) {}
+});
 </script>
 </body>
 </html>

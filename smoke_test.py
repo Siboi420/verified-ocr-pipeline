@@ -1114,6 +1114,32 @@ def main():
     check('https://cdn.jsdelivr.net/npm/marked@15/marked.min.js' in h,
           "/chat includes the marked CDN for markdown rendering")
 
+    # --- dark theme (default) + chat layout overhaul ---
+    r = client.get("/")
+    h = r.get_data(as_text=True)
+    check('<html lang="en" data-theme="dark">' in h
+          and "localStorage.getItem('theme') || 'dark'" in h
+          and 'id="themeBtn"' in h,
+          "/ defaults to dark theme (anti-FOUC script + shared theme toggle)")
+    check('--bg:#0f172a' in h and '--surface:#1e293b' in h and '--line:#334155' in h,
+          "/ carries the dark token palette (soft slate)")
+    r = client.get("/chat")
+    h = r.get_data(as_text=True)
+    check('<html lang="en" data-theme="dark">' in h
+          and "localStorage.getItem('theme') || 'dark'" in h
+          and 'id="themeBtn"' in h,
+          "/chat defaults to dark theme (anti-FOUC script + shared theme toggle)")
+    check('id="sideToggle"' in h and 'id="thread"' in h
+          and 'id="inputRow"' in h and 'id="settingsWrap"' in h
+          and 'id="settingsPanel"' in h and 'id="settingsBtn"' in h,
+          "/chat layout: sidebar toggle, full-height thread, pinned input, settings dropdown")
+    check('id="modelSel"' in h and 'id="loadBtn"' in h
+          and 'id="settingsSave"' in h and 'id="moSel"' in h
+          and 'id="g-context_length"' in h and 'id="kbSel"' in h
+          and '<a href="/"' in h and '<a href="/chat"' in h
+          and 'https://cdn.jsdelivr.net/npm/marked@15/marked.min.js' in h,
+          "/chat preserves existing control ids + tab links + marked CDN")
+
     # discard document: pending record + verified/rejected item copies removed
     r = client.post(f"/doc/{doc_id}/discard")
     check(r.status_code == 200 and not (REPO / "validation" / "pending" / f"{doc_id}.json").exists(),
